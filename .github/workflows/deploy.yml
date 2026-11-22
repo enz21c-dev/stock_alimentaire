@@ -25,7 +25,7 @@ jobs:
         with:
           node-version: 22
       - name: Tests de la logique
-        run: node --test lite/test/
+        run: node --test lite/test/logic.test.js
       - name: Préparation du site
         run: |
           mkdir site
