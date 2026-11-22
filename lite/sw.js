@@ -5,7 +5,9 @@
  * et utilisée à l'ouverture suivante.
  * (Les données, elles, sont déjà sur l'iPad, dans Safari.)
  */
-var CACHE = 'stock-alimentaire-v1';
+var CACHE = 'stock-alimentaire-v2';
+// Base de produits (quelques Mo) : gardée aussi, mais son absence ne bloque pas l'appli.
+var DATA = 'data/products-fr.tsv';
 var FILES = [
   './',
   'index.html',
@@ -21,7 +23,11 @@ var FILES = [
 ];
 
 self.addEventListener('install', function (event) {
-  event.waitUntil(caches.open(CACHE).then(function (cache) { return cache.addAll(FILES); }));
+  event.waitUntil(caches.open(CACHE).then(function (cache) {
+    return cache.addAll(FILES).then(function () {
+      return cache.add(DATA).catch(function () { /* réessayé au prochain chargement */ });
+    });
+  }));
   self.skipWaiting();
 });
 
@@ -38,6 +44,9 @@ self.addEventListener('fetch', function (event) {
   if (new URL(req.url).origin !== self.location.origin) return;
   event.respondWith(caches.open(CACHE).then(function (cache) {
     return cache.match(req, { ignoreSearch: true }).then(function (cached) {
+      // La base de produits ne se retélécharge pas à chaque ouverture
+      // (elle change avec la version du cache).
+      if (cached && req.url.indexOf(DATA) >= 0) return cached;
       var network = fetch(req).then(function (res) {
         if (res && res.ok) cache.put(req, res.clone());
         return res;

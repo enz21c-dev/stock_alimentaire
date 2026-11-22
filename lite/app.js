@@ -308,7 +308,8 @@
     if (!p) {
       p = {
         id: newId(), name: o.name, brand: o.brand || '', barcode: o.barcode || '',
-        category: o.category, unit: o.unit, photoUrl: o.photoUrl || '', photo: o.photo || ''
+        category: o.category, unit: o.unit, photoUrl: o.photoUrl || '', photo: o.photo || '',
+        pending: !!(o.pending && o.barcode), placeholder: !!o.placeholder
       };
       db.products.push(p);
     } else {
@@ -389,10 +390,12 @@
     openModal(
       '<h3>' + (opts.fromScan ? 'Article scanné' : (p ? 'Ajouter un lot' : 'Ajouter un article')) + '</h3>' +
       (opts.message ? '<p class="warn">' + esc(opts.message) + '</p>' : '') +
+      (off && off.local ? '<p class="note">Trouvé dans la base de produits de l\'appli (sans internet).</p>' : '') +
       '<div class="row field">' +
       '<label style="margin:0" id="f-photo-prev">' + thumb({ name: name, photo: form.photo, photoUrl: form.photoUrl }, true) + '</label>' +
       '<div class="grow">' +
-      '<div class="field"><label>Nom du produit</label><input type="text" id="f-name" value="' + esc(name) + '"' + (p ? ' readonly' : '') + ' autocomplete="off"></div>' +
+      '<div class="field"><label>Nom du produit</label><input type="text" id="f-name" value="' + esc(name) + '"' + (p ? ' readonly' : '') + ' autocomplete="off"' +
+      (opts.optionalName ? ' placeholder="Vide = rempli plus tard"' : '') + '></div>' +
       '<div class="field" style="margin:0"><label>Marque (facultatif)</label><input type="text" id="f-brand" value="' + esc(brand) + '"' + (p ? ' readonly' : '') + '></div>' +
       '</div></div>' +
       '<div class="field"><label class="btn small" style="display:inline-block;color:var(--green)">📷 Photo<input type="file" id="f-photo" accept="image/*" class="hidden"></label></div>' +
@@ -459,11 +462,18 @@
     var name = $('f-name').value.trim();
     var q = L.parseNumber($('f-qty').value);
     var exp = $('f-date').value;
+    var opts = form.opts;
+    var placeholder = false;
+    if (!name && opts.optionalName && opts.barcode) {
+      name = 'Produit ' + opts.barcode + ' (à compléter)';
+      placeholder = true;
+    }
     if (!name) { $('f-name').focus(); return; }
     if (q === null || q <= 0) { $('f-qty').focus(); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(exp)) { $('f-date').focus(); return; }
-    var opts = form.opts;
     addStock({
+      pending: !!opts.pending,
+      placeholder: placeholder,
       name: name,
       brand: $('f-brand').value.trim(),
       barcode: opts.barcode || (opts.product ? opts.product.barcode : ''),
@@ -477,6 +487,7 @@
     form = null;
     closeModal(true);
     commit();
+    completePending();
     if (opts.fromScan) {
       scan.count++;
       resumeScan(true);
@@ -689,25 +700,146 @@
     });
   }
 
+  // ---- Base de produits embarquée (hors ligne) ----
+  // Fichier data/products-fr.tsv : code, nom, marque, n° catégorie, contenance, image.
+  var localDb = { map: null, loading: null, count: 0 };
+
+  function loadLocalDb() {
+    if (localDb.map) return Promise.resolve(localDb.map);
+    if (localDb.loading) return localDb.loading;
+    localDb.loading = fetch('data/products-fr.tsv').then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    }).then(function (text) {
+      var map = {};
+      var n = 0;
+      var start = 0;
+      while (start < text.length) {
+        var end = text.indexOf('\n', start);
+        if (end < 0) end = text.length;
+        var tab = text.indexOf('\t', start);
+        if (tab > start && tab < end) {
+          map[text.slice(start, tab)] = text.slice(tab + 1, end);
+          n++;
+        }
+        start = end + 1;
+      }
+      localDb.map = map;
+      localDb.count = n;
+      return map;
+    }).catch(function () {
+      localDb.loading = null;
+      return null;
+    });
+    return localDb.loading;
+  }
+
+  function offImageUrl(code, file) {
+    if (!file) return '';
+    var folder = code;
+    if (code.length > 8) {
+      var c = code;
+      while (c.length < 13) c = '0' + c;
+      folder = c.slice(0, 3) + '/' + c.slice(3, 6) + '/' + c.slice(6, 9) + '/' + c.slice(9);
+    }
+    return 'https://images.openfoodfacts.org/images/products/' + folder + '/' + file;
+  }
+
+  function lookupLocal(code) {
+    return loadLocalDb().then(function (map) {
+      var line = map ? map[code] : null;
+      if (!line) return null;
+      var f = line.split('\t');
+      var q = L.parseOffQuantity(f[3]);
+      return {
+        name: f[0],
+        brand: f[1] || '',
+        category: L.DEFAULT_CATEGORIES[Number(f[2])] || 'Autre',
+        quantity: q ? q[0] : null,
+        unit: q ? q[1] : null,
+        imageUrl: offImageUrl(code, f[4]),
+        local: true
+      };
+    });
+  }
+
+  /** Cherche d'abord dans la base embarquée (instantané, sans internet),
+   *  sinon sur Open Food Facts si on a internet. */
   function handleBarcode(code, fromScan) {
     var known = productByBarcode(code);
     if (known) {
       openArticleForm({ product: known, barcode: code, fromScan: fromScan });
       return;
     }
+    var stillOpen = function () { return $('modal').className !== 'hidden'; };
     openModal('<h3>Recherche du produit…</h3><p class="muted">Code-barres ' + esc(code) + '</p>', {},
       function () { if (fromScan) resumeScan(); });
-    lookupOff(code).then(function (off) {
-      if ($('modal').className === 'hidden') return; // fermé entre-temps
-      closeModal(true);
-      openArticleForm({ off: off, barcode: code, fromScan: fromScan,
-        message: off ? '' : "Produit inconnu d'Open Food Facts : complète la fiche." });
-    }, function () {
-      if ($('modal').className === 'hidden') return;
-      closeModal(true);
-      openArticleForm({ barcode: code, fromScan: fromScan,
-        message: 'Pas de connexion à Open Food Facts : complète la fiche à la main.' });
+    lookupLocal(code).then(function (local) {
+      if (!stillOpen()) return;
+      if (local) {
+        closeModal(true);
+        openArticleForm({ off: local, barcode: code, fromScan: fromScan, pending: true });
+        return;
+      }
+      if (navigator.onLine === false) {
+        closeModal(true);
+        openArticleForm({ barcode: code, fromScan: fromScan, pending: true, optionalName: true,
+          message: 'Pas de connexion : laisse le nom vide, il sera rempli tout seul à la prochaine connexion (ou tape-le).' });
+        return;
+      }
+      lookupOff(code).then(function (off) {
+        if (!stillOpen()) return;
+        closeModal(true);
+        openArticleForm({ off: off, barcode: code, fromScan: fromScan,
+          message: off ? '' : "Produit inconnu d'Open Food Facts : complète la fiche." });
+      }, function () {
+        if (!stillOpen()) return;
+        closeModal(true);
+        openArticleForm({ barcode: code, fromScan: fromScan, pending: true, optionalName: true,
+          message: 'Pas de connexion : laisse le nom vide, il sera rempli tout seul à la prochaine connexion (ou tape-le).' });
+      });
     });
+  }
+
+  /** Complète les fiches créées hors ligne (nom, photo, marque) dès qu'internet revient. */
+  var completing = false;
+  function completePending() {
+    if (completing || navigator.onLine === false) return;
+    var todo = db.products.filter(function (p) { return p.pending && p.barcode; }).slice(0, 25);
+    if (!todo.length) return;
+    completing = true;
+    var changed = 0;
+    var i = 0;
+    function next() {
+      if (i >= todo.length) {
+        completing = false;
+        if (changed) {
+          save();
+          render();
+          showToast(changed === 1 ? '1 fiche produit complétée' : changed + ' fiches produits complétées');
+        }
+        return;
+      }
+      var p = todo[i++];
+      lookupOff(p.barcode).then(function (off) {
+        if (off) {
+          if (p.placeholder) {
+            p.name = off.name;
+            p.placeholder = false;
+            if (p.category === 'Autre') p.category = off.category;
+          }
+          if (!p.brand) p.brand = off.brand;
+          if (!p.photo && off.imageUrl) p.photoUrl = off.imageUrl;
+          changed++;
+        }
+        p.pending = false; // trouvé ou inconnu : on ne redemande pas
+        next();
+      }, function () {
+        completing = false; // plus de réseau : on réessaiera plus tard
+        if (changed) { save(); render(); }
+      });
+    }
+    next();
   }
 
   function askBarcode(fromScan) {
@@ -1247,6 +1379,12 @@
       '<p class="muted">' + plural(productsInStock().length, 'produit') + ' en stock · ' + plural(db.recipes.length, 'recette') + '</p>' +
       '<div class="wrap"><button class="btn primary" data-action="export">Exporter</button>' +
       '<button class="btn" data-action="import">Importer</button></div></div>';
+    var pending = db.products.filter(function (p) { return p.pending; }).length;
+    html += '<h2>Base de produits</h2><div class="card pad">' +
+      (localDb.map ? plural(localDb.count, 'produit') + ' courants reconnus même sans internet.'
+        : 'Base hors ligne en cours de chargement…') +
+      (pending ? '<div class="muted" style="margin-top:6px">' + plural(pending, 'fiche') + ' à compléter à la prochaine connexion.</div>' : '') +
+      '</div>';
     html += '<h2>À propos</h2><div class="card pad muted">Stock Alimentaire — version légère compatible iPad iOS 12.<br>' +
       'Infos produits : Open Food Facts (openfoodfacts.org), base libre et collaborative.</div>';
     return html;
@@ -1469,6 +1607,11 @@
 
   syncShopping();
   render();
+
+  // Base hors ligne chargée en avance (scan instantané) ; fiches à compléter dès qu'il y a internet.
+  setTimeout(function () { loadLocalDb().then(function () { if (ui.tab === 'settings') render(); }); }, 1500);
+  setTimeout(completePending, 3000);
+  window.addEventListener('online', function () { setTimeout(completePending, 2000); });
 
   // Mode hors ligne : l'appli se garde une copie d'elle-même sur l'iPad.
   if ('serviceWorker' in navigator) {
