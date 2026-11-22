@@ -6,7 +6,8 @@ plugins {
 
 android {
     namespace = "fr.perso.stock_alimentaire"
-    compileSdk = flutter.compileSdkVersion
+    // 37 : exigé par flutter_local_notifications (Flutter propose 36 par défaut)
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
