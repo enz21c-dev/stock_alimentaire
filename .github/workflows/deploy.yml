@@ -1,4 +1,5 @@
-# Compile l'appli web et la publie sur GitHub Pages à chaque envoi sur « main ».
+# Teste puis publie la version légère (dossier lite/, compatible iPad iOS 12)
+# sur GitHub Pages à chaque envoi sur « main ».
 name: Publier l'appli
 
 on:
@@ -20,18 +21,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: actions/setup-node@v4
         with:
-          flutter-version: 3.50.1
-          channel: stable
-          cache: true
-      - run: flutter pub get
-      - run: flutter test
-      - name: Compilation web
-        run: flutter build web --release --no-wasm-dry-run --base-href "/${{ github.event.repository.name }}/"
+          node-version: 22
+      - name: Tests de la logique
+        run: node --test lite/test/
+      - name: Préparation du site
+        run: |
+          mkdir site
+          cp -r lite/. site/
+          rm -rf site/test
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: build/web
+          path: site
 
   deploy:
     needs: build

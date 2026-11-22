@@ -1,9 +1,34 @@
 # Stock Alimentaire
 
-Appli de gestion du stock alimentaire du foyer, écrite en **Flutter** et publiée
-comme **appli web** pour être utilisée sur un **iPad** (ajoutée à l'écran d'accueil
-depuis Safari). Pas de serveur, pas de compte : les données restent dans le
-navigateur de l'appareil (IndexedDB). Seul appel réseau : Open Food Facts au scan.
+Appli de gestion du stock alimentaire du foyer.
+
+**Adresse : https://enz21c-dev.github.io/stock_alimentaire/**
+
+## Deux versions dans ce dépôt
+
+| Dossier | Version | Utilisée pour |
+|---|---|---|
+| `lite/` | **Version légère** en HTML/JavaScript simple, compatible **Safari d'iOS 12** | **C'est celle qui est publiée** (l'iPad de la maison est bloqué en iOS 12.5.8, trop ancien pour Flutter) |
+| `lib/`, `web/`, `test/` | Version **Flutter** (Dart) | Gardée pour un futur appareil récent ou une appli Android |
+
+### Version légère (`lite/`)
+
+- `index.html`, `style.css` : la page ; `logic.js` : règles (lots, FEFO, besoins des
+  recettes, liste de courses) ; `app.js` : écrans et enregistrement.
+- Données dans le `localStorage` de Safari, sur l'iPad uniquement.
+- Scan : bibliothèque ZXing (`vendor/`, licence Apache 2.0) + Open Food Facts.
+- Sur iOS 12 la caméra ne marche que **dans Safari** (pas en mode plein écran), d'où
+  l'absence volontaire de `apple-mobile-web-app-capable`.
+- Règles de compatibilité Safari 12 : pas de `?.`, `??`, `replaceAll`, `<dialog>`,
+  ni de `gap` en flexbox.
+- Tests : `node --test lite/test/` ; essai local :
+  `python -m http.server 8081 --directory lite` puis http://localhost:8081.
+- Publication automatique (`.github/workflows/deploy.yml`) à chaque `git push`.
+
+## Version Flutter
+
+Écrite en **Flutter** comme **appli web**. Pas de serveur, pas de compte : les données
+restent dans le navigateur de l'appareil (IndexedDB). Seul appel réseau : Open Food Facts au scan.
 
 ## Pourquoi une appli web et pas une appli iOS / Android ?
 

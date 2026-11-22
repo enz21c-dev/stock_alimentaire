@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="Gestion du stock alimentaire du foyer.">
+  <!-- Pas de mode « plein écran » volontairement : sur iOS 12 la caméra ne
+       fonctionne que dans Safari, pas dans une appli web d'écran d'accueil. -->
+  <meta name="apple-mobile-web-app-title" content="Stock">
+  <meta name="theme-color" content="#2E7D32">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="manifest" href="manifest.json">
+  <title>Stock Alimentaire</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div id="title">Stock</div>
+    <div id="top-actions"></div>
+  </header>
+
+  <main id="view"><p class="empty">Chargement…</p></main>
+
+  <div id="fabs"></div>
+
+  <nav id="tabs">
+    <button data-action="tab" data-tab="stock"><span class="ico">🥫</span><span>Stock</span></button>
+    <button data-action="tab" data-tab="expiring"><span class="ico">⏰</span><span>Bientôt périmés</span><b class="badge" id="badge-expiring"></b></button>
+    <button data-action="tab" data-tab="recipes"><span class="ico">📖</span><span>Recettes</span></button>
+    <button data-action="tab" data-tab="planning"><span class="ico">📅</span><span>Planning</span></button>
+    <button data-action="tab" data-tab="shopping"><span class="ico">🛒</span><span>Courses</span><b class="badge" id="badge-shopping"></b></button>
+    <button data-action="tab" data-tab="settings"><span class="ico">⚙️</span><span>Réglages</span></button>
+  </nav>
+
+  <!-- Scanner plein écran -->
+  <div id="scanner" class="hidden">
+    <video id="scan-video" playsinline autoplay muted></video>
+    <div id="scan-frame"></div>
+    <div id="scan-top">
+      <button class="btn light" data-action="scan-close">✕ Fermer</button>
+      <span id="scan-count"></span>
+      <button class="btn light" data-action="scan-type">⌨️ Taper le code</button>
+    </div>
+    <div id="scan-msg">Vise le code-barres. La caméra reste ouverte pour enchaîner les articles.</div>
+  </div>
+
+  <div id="modal" class="hidden"><div id="modal-box"></div></div>
+  <div id="toast" class="hidden"><span id="toast-text"></span><button id="toast-btn" data-action="toast-undo">Annuler</button></div>
+
+  <script src="vendor/zxing-0.21.3.min.js"></script>
+  <script src="logic.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
