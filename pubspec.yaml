@@ -1,0 +1,36 @@
+name: stock_alimentaire
+description: Gestion du stock alimentaire du foyer (appli web pour iPad).
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.14.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  material_ui: ^1.11.1
+
+  # Base de données locale dans le navigateur (IndexedDB), rien sur un serveur
+  sembast: ^3.10.1
+  sembast_web: ^2.4.7
+
+  # Scan de codes-barres (caméra) et recherche Open Food Facts
+  mobile_scanner: ^7.5.0
+  http: ^1.6.0
+
+  # Photos, import de sauvegarde, dates en français, fonctions du navigateur
+  image_picker: ^1.2.4
+  file_picker: ^13.4.1
+  intl: ^0.20.3
+  web: ^1.1.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

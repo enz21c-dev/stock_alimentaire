@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <!-- Remplacé par la valeur de --base-href lors de « flutter build web ». -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Gestion du stock alimentaire du foyer.">
+
+  <!-- iPad / iPhone : appli plein écran depuis l'écran d'accueil -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Stock">
+  <meta name="theme-color" content="#2E7D32">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Stock Alimentaire</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    body { margin: 0; background: #f6fbf3; }
+    @media (prefers-color-scheme: dark) { body { background: #10140f; } #loading { color: #c2c9bd; } }
+    #loading {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-family: -apple-system, system-ui, sans-serif; color: #42493f; font-size: 18px;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">Chargement du stock…</div>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
