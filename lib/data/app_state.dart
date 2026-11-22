@@ -6,7 +6,9 @@ import 'package:sembast/sembast.dart';
 import '../logic/stock_logic.dart';
 import '../logic/units.dart';
 import '../models/models.dart';
-import 'db_factory_memory.dart' if (dart.library.js_interop) 'db_factory_web.dart';
+import 'db_factory_memory.dart'
+    if (dart.library.js_interop) 'db_factory_web.dart'
+    if (dart.library.io) 'db_factory_io.dart';
 
 /// Ce qu'il faut pour annuler une suppression / consommation.
 class UndoSnapshot {
@@ -37,7 +39,7 @@ class AppState extends ChangeNotifier {
   Settings settings = Settings();
 
   static Future<AppState> open({DatabaseFactory? factory, String name = 'stock_alimentaire.db'}) async {
-    final db = await (factory ?? platformDatabaseFactory).openDatabase(name);
+    final db = factory != null ? await factory.openDatabase(name) : await openPlatformDatabase(name);
     final s = AppState._(db);
     await s._load();
     return s;

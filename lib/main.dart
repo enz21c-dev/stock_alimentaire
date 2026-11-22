@@ -4,6 +4,8 @@ import 'package:intl/intl.dart';
 
 import 'data/app_state.dart';
 import 'platform/platform.dart';
+import 'services/local_products.dart';
+import 'services/notifications.dart';
 import 'ui/home_shell.dart';
 
 Future<void> main() async {
@@ -19,6 +21,10 @@ Future<void> main() async {
     error = e;
   }
   runApp(StockAlimentaireApp(state: state, error: error));
+  if (state != null) {
+    ExpiryNotifications.start(state); // Android : notifications de péremption
+    LocalProducts.preload(); // base de produits hors ligne
+  }
 }
 
 class StockAlimentaireApp extends StatelessWidget {

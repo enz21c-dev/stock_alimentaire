@@ -1,4 +1,4 @@
 import 'package:sembast/sembast_memory.dart';
 
-/// Hors navigateur (tests, Windows) : base en mémoire.
-DatabaseFactory get platformDatabaseFactory => databaseFactoryMemory;
+/// Repli (plateforme inconnue) : base en mémoire.
+Future<Database> openPlatformDatabase(String name) => databaseFactoryMemory.openDatabase(name);

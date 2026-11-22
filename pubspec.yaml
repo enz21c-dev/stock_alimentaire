@@ -1,5 +1,5 @@
 name: stock_alimentaire
-description: Gestion du stock alimentaire du foyer (appli web pour iPad).
+description: Gestion du stock alimentaire du foyer (Android et web).
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -26,6 +26,9 @@ dependencies:
   file_picker: ^13.4.1
   intl: ^0.20.3
   web: ^1.1.2
+  path_provider: ^2.1.6
+  flutter_local_notifications: ^23.0.3
+  timezone: ^0.11.2
 
 dev_dependencies:
   flutter_test:
@@ -34,3 +37,6 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    # Base de produits hors ligne (partagée avec la version légère)
+    - lite/data/products-fr.tsv

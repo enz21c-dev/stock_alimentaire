@@ -4,6 +4,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import '../data/app_state.dart';
 import '../models/models.dart';
 import '../platform/platform.dart';
+import '../services/local_products.dart';
 import '../services/open_food_facts.dart';
 import 'add_article_screen.dart';
 
@@ -182,6 +183,9 @@ class _ScanSheetState extends State<_ScanSheet> {
   }
 
   Future<(OffProduct?, String?)> _fetch() async {
+    // D'abord la base embarquée (sans internet), puis Open Food Facts.
+    final local = await LocalProducts.lookup(widget.code);
+    if (local != null) return (local, null);
     try {
       final p = await OpenFoodFacts.lookup(widget.code);
       return (p, p == null ? 'Produit inconnu d\'Open Food Facts : complète la fiche.' : null);
