@@ -1229,7 +1229,8 @@
     db.products.forEach(function (p) { used[p.category] = true; });
     var html = '';
     html += '<div class="banner green">📱 <b>Installer sur l\'écran d\'accueil</b><br><span style="font-weight:400">Dans Safari : bouton Partager (carré avec une flèche) → « Sur l\'écran d\'accueil ». ' +
-      'L\'icône ouvrira l\'appli dans Safari, ce qui permet d\'utiliser la caméra.</span></div>';
+      'L\'icône ouvrira l\'appli dans Safari, ce qui permet d\'utiliser la caméra.<br>' +
+      '📴 L\'appli marche <b>sans internet</b> : seule la recherche du nom d\'un produit scanné inconnu a besoin du réseau.</span></div>';
     html += '<h2>Alertes de péremption</h2><div class="card pad row"><div class="grow">Prévenir ' + plural(s.alertDays, 'jour') + ' avant la date' +
       '<div class="muted">Pastille orange et onglet « Bientôt périmés »</div></div>' +
       '<button class="icon-btn" data-action="alert" data-delta="-1">➖</button><b>' + s.alertDays + '</b>' +
@@ -1468,4 +1469,11 @@
 
   syncShopping();
   render();
+
+  // Mode hors ligne : l'appli se garde une copie d'elle-même sur l'iPad.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function () { /* hors ligne indisponible */ });
+    });
+  }
 })();
