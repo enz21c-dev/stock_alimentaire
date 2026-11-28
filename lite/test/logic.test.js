@@ -106,3 +106,91 @@ test('besoins des recettes et liste de courses', () => {
   assert.equal(oeufs.qty, 2);
   assert.equal(oeufs.auto, true);
 });
+
+test('catégories : « plant-based-foods-and-beverages » ne veut pas dire Boissons', () => {
+  assert.equal(L.mapOffCategory(['en:plant-based-foods-and-beverages', 'en:plant-based-foods', 'en:pastas']), 'Épicerie');
+  assert.equal(L.mapOffCategory(['en:plant-based-foods-and-beverages', 'en:beverages', 'en:plant-milks']), 'Boissons');
+  assert.equal(L.mapOffCategory(['en:charcuteries', 'en:hams']), 'Frais');
+  assert.equal(L.mapOffCategory(['en:plant-based-foods-and-beverages', 'en:fruit-based-foods-and-beverages', 'en:spreads', 'en:jams']), 'Épicerie');
+  assert.equal(L.mapOffCategory(['en:plant-based-foods-and-beverages', 'en:vegetable-based-foods-and-beverages', 'en:vegetables', 'en:artichokes']), 'Épicerie');
+});
+
+test('quantité proposée au scan', () => {
+  assert.deepEqual(L.parsePack('4 x 125 g'), { count: 4, each: 125, unit: 'g' });
+  assert.deepEqual(L.suggestQuantity(L.parsePack('4 x 125 g')), { qty: 4, unit: 'pièce' });
+  assert.deepEqual(L.suggestQuantity(L.parsePack('400 g')), { qty: 400, unit: 'g' });
+  assert.deepEqual(L.suggestQuantity(L.parsePack('1,5 L')), { qty: 1.5, unit: 'L' });
+  assert.deepEqual(L.suggestQuantity(null), { qty: 1, unit: 'pièce' });
+});
+
+test('calories : produits et recettes, par personne', () => {
+  const nutella = { id: 'n', name: 'Nutella', unit: 'g', kcal100: 539 };
+  const yaourt = { id: 'y', name: 'Yaourt', unit: 'pièce', kcal100: 60, packQty: 125, packUnit: 'g' };
+  const lait = { id: 'l', name: 'Lait', unit: 'L', kcal100: 46 };
+  assert.equal(L.kcalOf(nutella, 15, 'g'), 539 * 0.15);
+  assert.equal(L.kcalOf(yaourt, 2, 'pièce'), 150);
+  assert.equal(L.kcalOf(lait, 0.5, 'L'), 230);
+  assert.equal(L.kcalOf({ id: 'x', unit: 'g' }, 100, 'g'), null);
+  assert.equal(L.kcalOf({ id: 'x', unit: 'pièce', kcal100: 50 }, 1, 'pièce'), null); // poids inconnu
+  const r = { id: 'r', name: 'Gâteau', servings: 4, ingredients: [
+    { name: 'Yaourt', qty: 2, unit: 'pièce', productId: 'y' },
+    { name: 'Lait', qty: 500, unit: 'ml' },
+    { name: 'Sel', qty: 1, unit: 'g' },
+  ] };
+  const k = L.recipeKcal(r, [nutella, yaourt, lait]);
+  assert.equal(k.total, 150 + 230);
+  assert.equal(k.perPerson, 95);
+  assert.equal(k.unknown, 1);
+  const k8 = L.recipeKcal(r, [nutella, yaourt, lait], 8); // double
+  assert.equal(k8.total, 760);
+  assert.equal(k8.perPerson, 95);
+});
+
+test('portions : besoins proportionnels au nombre de personnes', () => {
+  const recipes = { r: { id: 'r', name: 'Crêpes', servings: 4, ingredients: [{ name: 'Farine', qty: 250, unit: 'g' }] } };
+  const n2 = L.computeNeeds([{ recipeId: 'r', people: 2 }], recipes, [], [], today);
+  assert.equal(n2[0].needed, 125);
+  const n8 = L.computeNeeds([{ recipeId: 'r', people: 8 }], recipes, [], [], today);
+  assert.equal(n8[0].needed, 500);
+  assert.equal(L.computeNeeds([{ recipeId: 'r' }], recipes, [], [], today)[0].needed, 250);
+});
+
+test('congelé : la date de péremption ne compte plus', () => {
+  const p = { id: 'v', name: 'Viande', unit: 'g' };
+  const lots = [
+    { id: 'f', productId: 'v', qty: 500, exp: '2026-11-01', frozen: true },  // date dépassée mais congelé
+    { id: 'a', productId: 'v', qty: 200, exp: '2026-11-25' },
+  ];
+  assert.equal(L.availableQuantity(p, lots, 'g', today), 700);
+  assert.deepEqual(L.sortFefo(lots).map((b) => b.id), ['a', 'f']); // le frais d'abord
+  assert.deepEqual(L.consumeFefo(lots, 300).newQuantities, { a: 0, f: 400 });
+});
+
+test('stock minimum : ajouté aux besoins et à la liste de courses', () => {
+  const pates = { id: 'p', name: 'Pâtes', unit: 'pièce', minQty: 2 };
+  const riz = { id: 'r', name: 'Riz', unit: 'kg', minQty: 1 };
+  const batches = [{ id: '1', productId: 'p', qty: 1, exp: '2027-06-01' }, { id: '2', productId: 'r', qty: 2, exp: '2027-06-01' }];
+  assert.deepEqual(L.belowMinimum([pates, riz], batches, today).map((p) => p.id), ['p']);
+  const recipes = { c: { id: 'c', name: 'Carbo', ingredients: [{ name: 'Pâtes', qty: 1, unit: 'pièce', productId: 'p' }] } };
+  const needs = L.addMinStock(L.computeNeeds([{ recipeId: 'c' }], recipes, [pates, riz], batches, today), [pates, riz], batches, today);
+  const p = needs.find((n) => n.name === 'Pâtes');
+  assert.equal(p.needed, 3); // 1 pour la recette + 2 de minimum
+  assert.equal(p.missing, 2);
+  assert.ok(!needs.find((n) => n.name === 'Riz').missing);
+  const list = L.regenerateShopping([], needs, () => 'id');
+  assert.equal(list.length, 1);
+  assert.equal(list[0].why, 'both');
+});
+
+test('dates lues sur une photo : seulement si elles sont vraiment écrites', () => {
+  const d = (txt) => L.findDates(txt, today).map((x) => x.key);
+  assert.deepEqual(d('A consommer jusqu\'au 12/05/2027 L1234'), ['2027-05-12']);
+  assert.deepEqual(d('DLC 03.12.26'), ['2026-12-03']);
+  assert.deepEqual(d('à consommer de préférence avant le 15 MAI 2027'), ['2027-05-15']);
+  assert.deepEqual(d('A consommer de préférence avant fin : 06/2027'), ['2027-06-30']);
+  assert.equal(L.findDates('fin 06/2027', today)[0].monthOnly, true);
+  assert.deepEqual(d('31/02/2027'), []);                  // date impossible
+  assert.deepEqual(d('LOT 3017620422003 18:45'), []);     // pas de date
+  assert.deepEqual(d('12/05/1998'), []);                   // trop ancienne
+  assert.deepEqual(d('Le 01/12/2026 et le 05/12/2026'), ['2026-12-01', '2026-12-05']); // plusieurs : on demandera
+});

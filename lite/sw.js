@@ -5,9 +5,12 @@
  * et utilisée à l'ouverture suivante.
  * (Les données, elles, sont déjà sur l'iPad, dans Safari.)
  */
-var CACHE = 'stock-alimentaire-v2';
+var CACHE = 'stock-alimentaire-v3';
 // Base de produits (quelques Mo) : gardée aussi, mais son absence ne bloque pas l'appli.
 var DATA = 'data/products-fr.tsv';
+// Lecture des dates sur photo (OCR, ~7 Mo) : gardée pour marcher sans internet.
+var OPTIONAL = [DATA, 'vendor/ocr/tesseract.min.js', 'vendor/ocr/worker.min.js',
+  'vendor/ocr/tesseract-core-lstm.wasm.js', 'vendor/ocr/eng.traineddata.gz'];
 var FILES = [
   './',
   'index.html',
@@ -25,7 +28,10 @@ var FILES = [
 self.addEventListener('install', function (event) {
   event.waitUntil(caches.open(CACHE).then(function (cache) {
     return cache.addAll(FILES).then(function () {
-      return cache.add(DATA).catch(function () { /* réessayé au prochain chargement */ });
+      // Chaque gros fichier séparément : un échec ne bloque pas les autres.
+      return Promise.all(OPTIONAL.map(function (f) {
+        return cache.add(f).catch(function () { /* réessayé au prochain chargement */ });
+      }));
     });
   }));
   self.skipWaiting();
@@ -46,7 +52,7 @@ self.addEventListener('fetch', function (event) {
     return cache.match(req, { ignoreSearch: true }).then(function (cached) {
       // La base de produits ne se retélécharge pas à chaque ouverture
       // (elle change avec la version du cache).
-      if (cached && req.url.indexOf(DATA) >= 0) return cached;
+      if (cached && (req.url.indexOf(DATA) >= 0 || req.url.indexOf('/vendor/') >= 0)) return cached;
       var network = fetch(req).then(function (res) {
         if (res && res.ok) cache.put(req, res.clone());
         return res;

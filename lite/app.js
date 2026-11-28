@@ -8,6 +8,7 @@
   var L = window.Logic;
   var STORAGE_KEY = 'stock_alimentaire_lite_v1';
   var BACKUP_FORMAT = 'stock_alimentaire_lite';
+  var DEFAULT_LOCATIONS = ['Frigo', 'Congélateur', 'Placard', 'Cave'];
 
   // ======================================================================
   // Données
@@ -15,7 +16,10 @@
   function emptyDb() {
     return {
       products: [], batches: [], recipes: [], plan: [], shopping: [],
-      settings: { alertDays: 3, categories: L.DEFAULT_CATEGORIES.slice(), planByDay: true }
+      settings: {
+        alertDays: 3, categories: L.DEFAULT_CATEGORIES.slice(), planByDay: true,
+        useLocations: false, locations: DEFAULT_LOCATIONS.slice()
+      }
     };
   }
 
@@ -29,6 +33,8 @@
     if (typeof s.alertDays === 'number') e.settings.alertDays = s.alertDays;
     if (Array.isArray(s.categories) && s.categories.length) e.settings.categories = s.categories;
     if (typeof s.planByDay === 'boolean') e.settings.planByDay = s.planByDay;
+    if (typeof s.useLocations === 'boolean') e.settings.useLocations = s.useLocations;
+    if (Array.isArray(s.locations) && s.locations.length) e.settings.locations = s.locations;
     return e;
   }
 
@@ -83,7 +89,18 @@
   }
   function expiringBatches() {
     var a = db.settings.alertDays;
-    return L.sortFefo(db.batches.filter(function (b) { return L.daysUntil(b.exp) <= a; }));
+    // Un lot congelé ne périme plus : pas d'alerte.
+    return L.sortFefo(db.batches.filter(function (b) { return !b.frozen && L.daysUntil(b.exp) <= a; }));
+  }
+
+  /** Catégorie de l'appli correspondant à une catégorie par défaut (Open Food Facts),
+   *  même si l'utilisateur l'a renommée (on suit sa position dans la liste). */
+  function mapCategory(name) {
+    var cats = db.settings.categories;
+    if (cats.indexOf(name) >= 0) return name;
+    var i = L.DEFAULT_CATEGORIES.indexOf(name);
+    if (i >= 0 && i < cats.length && L.DEFAULT_CATEGORIES.indexOf(cats[i]) < 0) return cats[i];
+    return cats.indexOf('Autre') >= 0 ? 'Autre' : cats[cats.length - 1];
   }
   function recipesMap() {
     var m = {};
@@ -97,8 +114,10 @@
   /** Garde la liste de courses à jour avec le planning et le stock. */
   function syncShopping() {
     var hasAuto = db.shopping.some(function (i) { return i.auto; });
-    if (!db.plan.length && !hasAuto) return;
-    db.shopping = L.regenerateShopping(db.shopping, currentNeeds(), newId);
+    var hasMin = db.products.some(function (p) { return p.minQty > 0; });
+    if (!db.plan.length && !hasAuto && !hasMin) return;
+    var needs = L.addMinStock(currentNeeds(), db.products, db.batches);
+    db.shopping = L.regenerateShopping(db.shopping, needs, newId);
   }
 
   /** Enregistre et redessine. */
@@ -141,6 +160,22 @@
   function expiryTag(exp) {
     return '<span class="tag ' + status(exp) + '">' + esc(L.expiryLabel(L.daysUntil(exp))) + '</span>';
   }
+  /** Étiquette d'un lot : congelé (pas de date), sinon date + « entamé ». */
+  function lotTag(b) {
+    if (b.frozen) return '<span class="tag frozen">❄️ congelé' + (b.frozenAt ? ' le ' + esc(fmtDate(b.frozenAt)) : '') + '</span>';
+    return expiryTag(b.exp) + (b.opened ? ' <span class="tag opened">entamé</span>' : '');
+  }
+  function lotStatus(b) { return b.frozen ? 'frozen' : status(b.exp); }
+  function kcalText(k) { return Math.round(k).toLocaleString('fr-FR') + ' kcal'; }
+  /** « · 539 kcal/100 g » ou « · 75 kcal/pièce » (vide si inconnu). */
+  function kcalInfo(p) {
+    if (typeof p.kcal100 !== 'number') return '';
+    if (p.unit === 'pièce') {
+      var k = L.kcalOf(p, 1, 'pièce');
+      return k === null ? '' : ' · ' + kcalText(k) + '/pièce';
+    }
+    return ' · ' + kcalText(p.kcal100) + '/100 ' + (L.baseUnit(p.unit) === 'ml' ? 'ml' : 'g');
+  }
 
   /** Vignette : photo prise, photo Open Food Facts, ou initiale. */
   function thumb(item, big) {
@@ -164,13 +199,14 @@
   // ======================================================================
   var toastTimer = null;
   var undoFn = null;
-  function showToast(message, onUndo) {
+  function showToast(message, onUndo, label) {
+    $('toast-btn').textContent = label || 'Annuler';
     $('toast-text').textContent = message;
     undoFn = onUndo || null;
     $('toast-btn').className = onUndo ? '' : 'hidden';
     $('toast').className = '';
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(hideToast, onUndo ? 7000 : 3500);
+    toastTimer = setTimeout(hideToast, onUndo ? 8000 : 3500);
   }
   function hideToast() { $('toast').className = 'hidden'; undoFn = null; }
 
@@ -309,11 +345,15 @@
       p = {
         id: newId(), name: o.name, brand: o.brand || '', barcode: o.barcode || '',
         category: o.category, unit: o.unit, photoUrl: o.photoUrl || '', photo: o.photo || '',
-        pending: !!(o.pending && o.barcode), placeholder: !!o.placeholder
+        pending: !!(o.pending && o.barcode), placeholder: !!o.placeholder,
+        kcal100: typeof o.kcal100 === 'number' ? o.kcal100 : null,
+        packQty: o.packQty || null, packUnit: o.packUnit || null
       };
       db.products.push(p);
     } else {
       p.category = o.category;
+      if (typeof o.kcal100 === 'number') p.kcal100 = o.kcal100;
+      if (o.packQty && !p.packQty) { p.packQty = o.packQty; p.packUnit = o.packUnit; }
       if (o.brand) p.brand = o.brand;
       if (o.barcode) p.barcode = o.barcode;
       if (o.photoUrl && !p.photoUrl) p.photoUrl = o.photoUrl;
@@ -322,14 +362,23 @@
       if (c !== null) q = c;
       else if (totalOf(p.id) === 0) p.unit = o.unit;
     }
-    db.batches.push({ id: newId(), productId: p.id, qty: q, exp: o.exp, added: new Date().toISOString() });
+    var lot = { id: newId(), productId: p.id, qty: q, exp: o.exp, added: new Date().toISOString() };
+    if (o.frozen) { lot.frozen = true; lot.frozenAt = L.todayKey(); }
+    if (o.location) lot.location = o.location;
+    db.batches.push(lot);
     return p;
   }
 
+  /** Nouvelles quantités (0 = lot supprimé). Un paquet en g/ml dont on n'a
+   *  utilisé qu'une partie devient « entamé ». */
   function applyQuantities(newQ) {
     db.batches = db.batches.filter(function (b) {
       if (!(b.id in newQ)) return true;
       if (newQ[b.id] <= 0) return false;
+      if (newQ[b.id] < b.qty && !b.opened && !b.frozen) {
+        var p = productById(b.productId);
+        if (p && p.unit !== 'pièce') { b.opened = true; b.openedAt = L.todayKey(); }
+      }
       b.qty = newQ[b.id];
       return true;
     });
@@ -349,20 +398,164 @@
     else askQuantity('Utiliser « ' + p.name + ' »', p.unit, p.unit === 'pièce' ? 1 : total, total, go);
   }
 
-  function consumeRecipe(r) {
+  /** Retire du stock les ingrédients d'une recette, pour `people` personnes. */
+  function consumeRecipe(r, people) {
+    var f = L.portionFactor(r, people);
     var newQ = {};
     r.ingredients.forEach(function (ing) {
       var p = L.matchProduct(ing, db.products);
       if (!p) return;
-      var q = L.convert(ing.qty, ing.unit, p.unit);
+      var q = L.convert(ing.qty * f, ing.unit, p.unit);
       if (q === null) return;
       var lots = batchesOf(p.id).map(function (b) {
-        return { id: b.id, qty: (b.id in newQ) ? newQ[b.id] : b.qty, exp: b.exp, added: b.added };
+        return { id: b.id, qty: (b.id in newQ) ? newQ[b.id] : b.qty, exp: b.exp, added: b.added, frozen: b.frozen };
       }).filter(function (b) { return b.qty > 0; });
       var res = L.consumeFefo(lots, q).newQuantities;
       Object.keys(res).forEach(function (k) { newQ[k] = res[k]; });
     });
     applyQuantities(newQ);
+  }
+
+  // ======================================================================
+  // Emplacements (facultatifs)
+  // ======================================================================
+  /** Emplacement proposé : congelé ou Surgelé → congélateur, Frais → frigo, sinon placard. */
+  function defaultLocation(category, frozen) {
+    var locs = db.settings.locations;
+    function pick(name, idx) { return locs.indexOf(name) >= 0 ? name : (locs[idx] || locs[0] || ''); }
+    if (frozen || category === mapCategory('Surgelé')) return pick('Congélateur', 1);
+    if (category === mapCategory('Frais')) return pick('Frigo', 0);
+    return pick('Placard', 2);
+  }
+  function lotLocation(b) { return b.location || ''; }
+  function locationField(id, selected) {
+    if (!db.settings.useLocations) return '';
+    return '<div class="field"><label>Emplacement</label><select id="' + id + '">' +
+      options(db.settings.locations, selected) + '</select></div>';
+  }
+
+  // ======================================================================
+  // Courses → stock
+  // ======================================================================
+  /** Ouvre la fiche d'ajout préremplie avec un article acheté ; il quitte la liste une fois rangé. */
+  function shoppingToStock(itemId) {
+    var i = find(db.shopping, itemId);
+    if (!i) return;
+    var p = productByName(i.name);
+    openArticleForm({
+      product: p, fromShopping: i.id,
+      prefill: { name: i.name, qty: i.qty, unit: i.unit }
+    });
+  }
+
+  // ======================================================================
+  // Lecture de la date sur une photo (OCR, sans internet)
+  // ======================================================================
+  // Règle : on ne propose QUE des dates réellement lues ; sinon, saisie à la main.
+  var ocr = { script: null };
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+
+  /** Photo → image en niveaux de gris, contrastée et redressée (lisible par l'OCR). */
+  function photoForOcr(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var orientation = jpegOrientation(reader.result);
+        var url = URL.createObjectURL(file);
+        var img = new Image();
+        img.onload = function () {
+          var max = 1600;
+          var w = img.naturalWidth, h = img.naturalHeight;
+          var scale = Math.min(1, max / Math.max(w, h));
+          var cw = Math.round(w * scale), ch = Math.round(h * scale);
+          var autoRotated = (typeof CSS !== 'undefined' && CSS.supports && CSS.supports('image-orientation', 'from-image'));
+          var rotate = !autoRotated && orientation >= 5 && orientation <= 8;
+          var c = document.createElement('canvas');
+          c.width = rotate ? ch : cw;
+          c.height = rotate ? cw : ch;
+          var ctx = c.getContext('2d');
+          if (!autoRotated) {
+            if (orientation === 3) ctx.transform(-1, 0, 0, -1, cw, ch);
+            else if (orientation === 6) ctx.transform(0, 1, -1, 0, ch, 0);
+            else if (orientation === 8) ctx.transform(0, -1, 1, 0, 0, cw);
+          }
+          ctx.drawImage(img, 0, 0, cw, ch);
+          URL.revokeObjectURL(url);
+          // niveaux de gris + étirement du contraste
+          var d = ctx.getImageData(0, 0, c.width, c.height);
+          var px = d.data, lo = 255, hi = 0, i, g;
+          for (i = 0; i < px.length; i += 4) {
+            g = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+            px[i] = g;
+            if (g < lo) lo = g;
+            if (g > hi) hi = g;
+          }
+          var range = Math.max(1, hi - lo);
+          for (i = 0; i < px.length; i += 4) {
+            g = (px[i] - lo) * 255 / range;
+            px[i] = px[i + 1] = px[i + 2] = g;
+          }
+          ctx.putImageData(d, 0, 0);
+          resolve(c.toDataURL('image/jpeg', 0.92));
+        };
+        img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('image')); };
+        img.src = url;
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  function readDateFromPhoto(file) {
+    var box = $('f-ocr');
+    function say(html) { var b = $('f-ocr'); if (b) b.innerHTML = html; }
+    say('⏳ Préparation de la lecture… (peut prendre jusqu\'à 30 secondes sur cet iPad)');
+    if (!ocr.script) ocr.script = loadScript('vendor/ocr/tesseract.min.js');
+    var worker = null;
+    ocr.script.then(function () {
+      return photoForOcr(file);
+    }).then(function (image) {
+      say('⏳ Lecture de la photo…');
+      return window.Tesseract.createWorker('eng', 1, {
+        workerPath: 'vendor/ocr/worker.min.js',
+        corePath: 'vendor/ocr/tesseract-core-lstm.wasm.js',
+        langPath: 'vendor/ocr',
+        gzip: true,
+        cacheMethod: 'none',
+        logger: function (m) {
+          if (m && m.status === 'recognizing text') say('⏳ Lecture de la photo… ' + Math.round((m.progress || 0) * 100) + ' %');
+        }
+      }).then(function (w) {
+        worker = w;
+        return w.recognize(image);
+      });
+    }).then(function (res) {
+      if (worker) worker.terminate();
+      var dates = L.findDates(res && res.data ? res.data.text : '');
+      if (!box || !$('f-ocr')) return;
+      if (!dates.length) {
+        say('❌ Aucune date lisible sur cette photo. Rapproche-toi de la date (bien nette, sans reflet) ou saisis-la à la main.');
+        return;
+      }
+      say((dates.length === 1 ? 'Date lue sur la photo :' : 'Plusieurs dates lues — choisis la bonne :') +
+        '<div class="wrap" style="margin-top:6px">' + dates.map(function (d) {
+          return '<button class="btn small primary" data-action="f-usedate" data-key="' + d.key + '">' +
+            esc(fmtDate(d.key)) + (d.monthOnly ? ' (fin du mois)' : '') + '</button>';
+        }).join('') + '</div><div style="margin-top:4px">Texte lu : « ' + esc(dates.map(function (d) { return d.text; }).join(' / ')) +
+        ' ». Vérifie avant de valider.</div>');
+    }).catch(function () {
+      if (worker) worker.terminate();
+      say('❌ La lecture n\'a pas marché sur cet appareil. Saisis la date à la main.');
+    });
   }
 
   // ======================================================================
@@ -381,10 +574,27 @@
       existing: p
     };
     var cats = db.settings.categories;
-    var cat = p ? p.category : (off ? off.category : 'Autre');
-    if (cats.indexOf(cat) < 0) cat = cats.indexOf('Autre') >= 0 ? 'Autre' : cats[0];
+    var cat = p ? p.category : mapCategory(off ? off.category : 'Autre');
+    if (cats.indexOf(cat) < 0) cat = mapCategory('Autre');
     var name = p ? p.name : (off ? off.name : '');
     var brand = p ? p.brand : (off ? off.brand : '');
+    // Quantité proposée d'après l'emballage : « 4 x 125 g » → 4 pièces, « 400 g » → 400 g.
+    var sugg = { qty: 1, unit: p ? p.unit : 'pièce' };
+    if (p && p.unit !== 'pièce' && p.packQty && L.convert(p.packQty, p.packUnit, p.unit) !== null) {
+      sugg = { qty: L.convert(p.packQty, p.packUnit, p.unit), unit: p.unit };
+    } else if (!p && off && off.pack) {
+      sugg = L.suggestQuantity(off.pack);
+    }
+    form.pack = off && off.pack ? { qty: off.pack.each, unit: off.pack.unit } : null;
+    if (opts.prefill) {
+      if (!p) name = opts.prefill.name;
+      if (opts.prefill.qty) {
+        var pu = opts.prefill.unit || 'pièce';
+        var cq = p ? L.convert(opts.prefill.qty, pu, p.unit) : null;
+        sugg = cq !== null ? { qty: cq, unit: p.unit } : { qty: opts.prefill.qty, unit: pu };
+      }
+    }
+    var kcal = p && typeof p.kcal100 === 'number' ? p.kcal100 : (off && typeof off.kcal100 === 'number' ? off.kcal100 : null);
     var quick = [['+3 j', 3], ['+1 sem.', 7], ['+2 sem.', 14], ['+1 mois', 30], ['+6 mois', 182], ['+1 an', 365]];
 
     openModal(
@@ -400,14 +610,21 @@
       '</div></div>' +
       '<div class="field"><label class="btn small" style="display:inline-block;color:var(--green)">📷 Photo<input type="file" id="f-photo" accept="image/*" class="hidden"></label></div>' +
       (opts.barcode ? '<p class="muted">Code-barres : ' + esc(opts.barcode) + '</p>' : '') +
-      (off && off.quantity ? '<p class="muted">Contenance indiquée : ' + esc(qty(off.quantity, off.unit)) + '</p>' : '') +
+      (off && off.quantityText ? '<p class="muted">Contenance indiquée : ' + esc(off.quantityText) + '</p>' : '') +
       '<div id="f-hint"></div>' +
       '<div class="field"><label>Catégorie</label><select id="f-cat">' + options(cats, cat) + '</select></div>' +
       '<div class="two field">' +
-      '<div><label class="muted">Quantité</label><input type="text" inputmode="decimal" id="f-qty" value="1"></div>' +
+      '<div><label class="muted">Quantité</label><input type="text" inputmode="decimal" id="f-qty" value="' + esc(L.formatNumber(sugg.qty)) + '"></div>' +
       '<div><label class="muted">Unité</label><select id="f-unit"></select></div>' +
       '</div>' +
+      '<div class="field"><label>Calories pour 100 g ou 100 ml (facultatif)</label>' +
+      '<input type="text" inputmode="decimal" id="f-kcal" value="' + (kcal === null ? '' : esc(L.formatNumber(kcal))) + '" placeholder="ex. 250"></div>' +
+      '<label class="row field" style="font-size:16px"><input type="checkbox" id="f-frozen" class="check"><span>❄️ Je le mets au congélateur (la date ne comptera plus)</span></label>' +
+      locationField('f-loc', defaultLocation(cat, false)) +
       '<div class="field"><label>À consommer avant le</label><input type="date" id="f-date" value="' + L.addDays(today, 7) + '"></div>' +
+      '<div class="field"><label class="btn small" style="display:inline-block">📷 Lire la date sur l\'emballage' +
+      '<input type="file" id="f-ocr-file" accept="image/*" class="hidden"></label>' +
+      '<div id="f-ocr" class="muted" style="margin-top:6px"></div></div>' +
       '<div class="wrap field">' + quick.map(function (x) {
         return '<button class="chip" data-action="f-quick" data-days="' + x[1] + '">' + x[0] + '</button>';
       }).join('') + '</div>' +
@@ -421,7 +638,7 @@
       },
       function () { form = null; if (opts.fromScan) resumeScan(false); }
     );
-    updateFormUnits(p ? p.unit : 'pièce');
+    updateFormUnits(sugg.unit);
     updateFormHint();
     if (!p && !opts.fromScan) setTimeout(function () { var i = $('f-name'); if (i) i.focus(); }, 50);
   }
@@ -471,9 +688,15 @@
     if (!name) { $('f-name').focus(); return; }
     if (q === null || q <= 0) { $('f-qty').focus(); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(exp)) { $('f-date').focus(); return; }
+    var kcal = L.parseNumber($('f-kcal').value);
     addStock({
       pending: !!opts.pending,
       placeholder: placeholder,
+      kcal100: kcal !== null && kcal >= 0 ? kcal : null,
+      packQty: form.pack ? form.pack.qty : null,
+      packUnit: form.pack ? form.pack.unit : null,
+      frozen: $('f-frozen').checked,
+      location: $('f-loc') ? $('f-loc').value : '',
       name: name,
       brand: $('f-brand').value.trim(),
       barcode: opts.barcode || (opts.product ? opts.product.barcode : ''),
@@ -494,6 +717,10 @@
       showToast(name + ' ajouté');
     } else {
       showToast('Article ajouté au stock');
+    if (opts.fromShopping) {
+      db.shopping = db.shopping.filter(function (i) { return i.id !== opts.fromShopping; });
+      commit();
+    }
     }
   }
 
@@ -509,6 +736,15 @@
       '<div class="field"><label>Nom</label><input type="text" id="p-name" value="' + esc(p.name) + '"></div>' +
       '<div class="field"><label>Marque</label><input type="text" id="p-brand" value="' + esc(p.brand || '') + '"></div>' +
       '<div class="field"><label>Catégorie</label><select id="p-cat">' + options(cats, p.category) + '</select></div>' +
+      '<div class="field"><label>Calories pour 100 g ou 100 ml</label><input type="text" inputmode="decimal" id="p-kcal" value="' +
+      (typeof p.kcal100 === 'number' ? esc(L.formatNumber(p.kcal100)) : '') + '" placeholder="inconnu"></div>' +
+      (p.unit === 'pièce'
+        ? '<div class="field"><label>Poids ou volume d\'une pièce (pour calculer les calories)</label><div class="two">' +
+          '<input type="text" inputmode="decimal" id="p-pack" value="' + (p.packQty ? esc(L.formatNumber(p.packQty)) : '') + '" placeholder="ex. 125">' +
+          '<select id="p-packunit">' + options(['g', 'ml'], L.baseUnit(p.packUnit || 'g') === 'ml' ? 'ml' : 'g') + '</select></div></div>'
+        : '') +
+      '<div class="field"><label>Toujours en avoir au moins (' + esc(p.unit) + ') — ajouté aux courses en dessous</label>' +
+      '<input type="text" inputmode="decimal" id="p-min" value="' + (p.minQty ? esc(L.formatNumber(p.minQty)) : '') + '" placeholder="pas de minimum" style="max-width:160px"></div>' +
       (p.barcode ? '<p class="muted">Code-barres : ' + esc(p.barcode) + '</p>' : '') +
       '<p class="muted">Unité : ' + esc(p.unit) + '</p>' +
       '<div class="actions"><button class="btn" data-action="modal-close">Annuler</button>' +
@@ -526,6 +762,15 @@
           p.category = $('p-cat').value;
           p.photo = form.photo;
           p.photoUrl = form.photoUrl;
+          var mq = L.parseNumber($('p-min').value);
+          p.minQty = mq && mq > 0 ? mq : null;
+          var k = L.parseNumber($('p-kcal').value);
+          p.kcal100 = k !== null && k >= 0 ? k : null;
+          if ($('p-pack')) {
+            var w = L.parseNumber($('p-pack').value);
+            p.packQty = w && w > 0 ? w : null;
+            p.packUnit = p.packQty ? $('p-packunit').value : null;
+          }
           form = null;
           closeModal(true);
           commit();
@@ -536,13 +781,46 @@
   function openLotEdit(bid) {
     var b = find(db.batches, bid);
     var p = productById(b.productId);
-    openModal('<h3>Modifier le lot</h3>' +
-      '<p class="muted">' + esc(p.name) + '</p>' +
+    var today = L.todayKey();
+    function earlier(days) { var d = L.addDays(today, days); return d < b.exp ? d : b.exp; }
+    openModal('<h3>Lot de ' + esc(p.name) + '</h3>' +
       '<div class="field"><label>Quantité (' + esc(p.unit) + ')</label><input type="text" inputmode="decimal" id="l-qty" value="' + esc(L.formatNumber(b.qty)) + '"></div>' +
-      '<div class="field"><label>À consommer avant le</label><input type="date" id="l-date" value="' + esc(b.exp) + '"></div>' +
+      locationField('l-loc', b.location || defaultLocation(p.category, b.frozen)) +
+      (b.frozen
+        ? '<p class="note">❄️ Congelé' + (b.frozenAt ? ' le ' + esc(fmtDate(b.frozenAt)) : '') + ' : la date de péremption ne compte pas.</p>' +
+          '<input type="hidden" id="l-date" value="' + esc(b.exp) + '">' +
+          '<div class="wrap field"><button class="btn" data-action="l-thaw">Décongeler (à consommer sous 24 h)</button></div>'
+        : '<div class="field"><label>À consommer avant le</label><input type="date" id="l-date" value="' + esc(b.exp) + '"></div>' +
+          '<label class="row field" style="font-size:16px"><input type="checkbox" id="l-opened" class="check"' + (b.opened ? ' checked' : '') + '><span>Entamé</span></label>' +
+          '<div class="field"><label>Une fois ouvert, à finir sous :</label><div class="wrap">' +
+          [[2, '2 j'], [3, '3 j'], [5, '5 j'], [7, '1 sem.'], [30, '1 mois']].map(function (x) {
+            return '<button class="chip" data-action="l-open" data-days="' + x[0] + '">' + x[1] + '</button>';
+          }).join('') + '</div></div>' +
+          '<div class="wrap field"><button class="btn" data-action="l-freeze">❄️ Congeler</button></div>') +
       '<div class="actions"><button class="btn" data-action="modal-close">Annuler</button>' +
       '<button class="btn primary" data-action="l-save">Enregistrer</button></div>',
       {
+        // « Entamé » + date raccourcie (sans jamais la repousser)
+        'l-open': function (el) {
+          $('l-opened').checked = true;
+          $('l-date').value = earlier(Number(el.getAttribute('data-days')));
+        },
+        'l-freeze': function () {
+          closeModal(true);
+          b.frozen = true;
+          b.frozenAt = today;
+          if (db.settings.useLocations) b.location = defaultLocation(p.category, true);
+          commit();
+          showToast(p.name + ' : congelé, la date ne compte plus');
+        },
+        'l-thaw': function () {
+          closeModal(true);
+          b.frozen = false;
+          b.frozenAt = null;
+          b.exp = L.addDays(today, 1);
+          commit();
+          showToast(p.name + ' : décongelé, à consommer avant demain');
+        },
         'l-save': function () {
           var q = L.parseNumber($('l-qty').value);
           var d = $('l-date').value;
@@ -555,6 +833,12 @@
           } else {
             b.qty = q;
             b.exp = d;
+            if ($('l-loc')) b.location = $('l-loc').value;
+            if ($('l-opened')) {
+              var op = $('l-opened').checked;
+              if (op && !b.opened) b.openedAt = today;
+              b.opened = op;
+            }
             commit();
           }
         }
@@ -675,9 +959,17 @@
     });
   }
 
+  /** Calories pour 100 g/ml d'après les données nutritionnelles d'Open Food Facts. */
+  function kcalFrom(n) {
+    if (!n) return null;
+    var k = n['energy-kcal_100g'];
+    if (typeof k !== 'number' && typeof n['energy_100g'] === 'number') k = n['energy_100g'] / 4.184; // kJ → kcal
+    return (typeof k === 'number' && k >= 0 && k < 1000) ? Math.round(k) : null;
+  }
+
   function lookupOff(code) {
     var url = 'https://world.openfoodfacts.org/api/v2/product/' + encodeURIComponent(code) +
-      '.json?lc=fr&fields=product_name,product_name_fr,generic_name_fr,brands,image_front_small_url,image_front_url,categories_tags,quantity';
+      '.json?lc=fr&fields=product_name,product_name_fr,generic_name_fr,brands,image_front_small_url,image_front_url,categories_tags,quantity,nutriments';
     return fetchWithTimeout(url, 10000).then(function (res) {
       if (res.status === 404) return null;
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -695,7 +987,10 @@
         imageUrl: str('image_front_small_url') || str('image_front_url'),
         category: L.mapOffCategory(Array.isArray(p.categories_tags) ? p.categories_tags : []),
         quantity: q ? q[0] : null,
-        unit: q ? q[1] : null
+        unit: q ? q[1] : null,
+        quantityText: str('quantity'),
+        pack: L.parsePack(str('quantity')),
+        kcal100: kcalFrom(p.nutriments)
       };
     });
   }
@@ -757,6 +1052,9 @@
         category: L.DEFAULT_CATEGORIES[Number(f[2])] || 'Autre',
         quantity: q ? q[0] : null,
         unit: q ? q[1] : null,
+        quantityText: f[3] || '',
+        pack: L.parsePack(f[3]),
+        kcal100: f[5] ? Number(f[5]) : null,
         imageUrl: offImageUrl(code, f[4]),
         local: true
       };
@@ -826,9 +1124,11 @@
           if (p.placeholder) {
             p.name = off.name;
             p.placeholder = false;
-            if (p.category === 'Autre') p.category = off.category;
+            if (p.category === mapCategory('Autre')) p.category = mapCategory(off.category);
           }
           if (!p.brand) p.brand = off.brand;
+          if (typeof p.kcal100 !== 'number' && typeof off.kcal100 === 'number') p.kcal100 = off.kcal100;
+          if (!p.packQty && off.pack) { p.packQty = off.pack.each; p.packUnit = off.pack.unit; }
           if (!p.photo && off.imageUrl) p.photoUrl = off.imageUrl;
           changed++;
         }
@@ -875,6 +1175,8 @@
       '<div class="row field"><div id="f-photo-prev">' + thumb({ name: r ? r.name : '+', photo: form.photo }, true) + '</div>' +
       '<div class="grow"><label>Nom de la recette</label><input type="text" id="r-name" value="' + esc(r ? r.name : '') + '">' +
       '<label class="btn small" style="display:inline-block;margin-top:8px">📷 Photo<input type="file" id="f-photo" accept="image/*" class="hidden"></label></div></div>' +
+      '<div class="field"><label>Pour combien de personnes ? (les quantités ci-dessous)</label>' +
+      '<input type="text" inputmode="numeric" id="r-serv" value="' + (r ? (r.servings || '') : '4') + '" placeholder="ex. 4" style="max-width:120px"></div>' +
       '<h3 style="font-size:17px;margin:8px 0 4px">Ingrédients</h3>' +
       '<p class="muted" style="margin-top:0">Écris le nom comme dans ton stock pour le relier automatiquement (une liste te propose les produits connus).</p>' +
       '<div id="r-rows"></div>' +
@@ -931,6 +1233,8 @@
     r.ingredients = ings;
     r.instructions = $('r-instr').value.trim();
     r.photo = form.photo;
+    var serv = Math.round(L.parseNumber($('r-serv').value) || 0);
+    r.servings = serv > 0 ? serv : null;
     form = null;
     recipeRows = null;
     closeModal(true);
@@ -944,10 +1248,13 @@
   }
 
   /** Recette faite : PROPOSE de retirer les ingrédients du stock (jamais automatique). */
-  function cookRecipe(r, entry) {
+  function cookRecipe(r, entry, peopleArg) {
+    var people = entry ? entry.people : peopleArg;
+    var f = L.portionFactor(r, people);
     var lines = [];
     var any = false;
-    r.ingredients.forEach(function (ing) {
+    r.ingredients.forEach(function (ing0) {
+      var ing = { name: ing0.name, qty: ing0.qty * f, unit: ing0.unit, productId: ing0.productId };
       var p = L.matchProduct(ing, db.products);
       var total = p ? totalOf(p.id) : 0;
       var wanted = p ? L.convert(ing.qty, ing.unit, p.unit) : null;
@@ -965,7 +1272,7 @@
       closeModal(true);
       if (entry) entry.done = true;
       if (consume) {
-        consumeRecipe(r);
+        consumeRecipe(r, people);
         commitWithUndo('Stock mis à jour pour « ' + r.name + ' »', snap);
       } else {
         commit();
@@ -973,6 +1280,7 @@
       }
     }
     openModal('<h3>« ' + esc(r.name) + ' » est faite ?</h3>' +
+      (people ? '<p class="muted">Pour ' + plural(people, 'personne') + '</p>' : '') +
       '<p>' + (any ? 'Retirer ces quantités du stock ?' : "Aucun ingrédient de cette recette n'est en stock.") + '</p>' +
       '<ul>' + lines.join('') + '</ul>' +
       '<div class="actions"><button class="btn" data-action="modal-close">Annuler</button>' +
@@ -990,15 +1298,32 @@
       { 'm-pick': function (el) { var r = recipeById(el.getAttribute('data-id')); closeModal(true); onPick(r); } });
   }
 
+  function peopleField(r) {
+    var n = ui.people[r.id] || r.servings || 2;
+    return '<div class="field"><label>Nombre de personnes</label>' +
+      '<input type="text" inputmode="numeric" id="m-people" value="' + n + '" style="max-width:120px"></div>';
+  }
+  function readPeople() {
+    var n = Math.round(L.parseNumber($('m-people') ? $('m-people').value : '') || 0);
+    return n > 0 ? n : null;
+  }
+
   function planRecipe(r) {
+    var today = L.todayKey();
     if (!db.settings.planByDay) {
-      db.plan.push({ id: newId(), recipeId: r.id, date: null, done: false });
-      commit();
-      showToast('« ' + r.name + ' » ajoutée au planning');
+      openModal('<h3>Ajouter « ' + esc(r.name) + ' » au planning</h3>' + peopleField(r) +
+        '<div class="actions"><button class="btn" data-action="modal-close">Annuler</button>' +
+        '<button class="btn primary" data-action="m-ok">Ajouter</button></div>',
+        { 'm-ok': function () {
+          var n = readPeople();
+          closeModal(true);
+          db.plan.push({ id: newId(), recipeId: r.id, date: null, done: false, people: n });
+          commit();
+          showToast('« ' + r.name + ' » ajoutée au planning');
+        } });
       return;
     }
-    var today = L.todayKey();
-    var html = '<h3>Planifier « ' + esc(r.name) + ' »</h3>';
+    var html = '<h3>Planifier « ' + esc(r.name) + ' »</h3>' + peopleField(r);
     for (var i = 0; i < 8; i++) {
       var k = L.addDays(today, i);
       html += '<button class="option" data-action="m-day" data-day="' + k + '">' +
@@ -1008,8 +1333,9 @@
       '<input type="date" id="m-date" value="' + today + '"><button class="btn primary" data-action="m-other" style="flex:0 0 auto">OK</button></div></div>' +
       '<div class="actions"><button class="btn" data-action="modal-close">Annuler</button></div>';
     function add(day) {
+      var n = readPeople();
       closeModal(true);
-      db.plan.push({ id: newId(), recipeId: r.id, date: day, done: false });
+      db.plan.push({ id: newId(), recipeId: r.id, date: day, done: false, people: n });
       commit();
       showToast('« ' + r.name + ' » prévue ' + fmtDay(day).toLowerCase());
     }
@@ -1079,7 +1405,7 @@
   // ======================================================================
   // Écrans
   // ======================================================================
-  var ui = { tab: 'stock', search: '', category: null, sort: 'expiry', expanded: {}, recipeId: null, weekStart: L.todayKey() };
+  var ui = { tab: 'stock', search: '', category: null, sort: 'expiry', expanded: {}, recipeId: null, weekStart: L.todayKey(), people: {} };
 
   var TITLES = { stock: 'Mon stock', expiring: 'Bientôt périmés', recipes: 'Recettes', planning: 'Planning', shopping: 'Liste de courses', settings: 'Réglages' };
 
@@ -1136,10 +1462,15 @@
     var q = L.normalizeName(ui.search);
     var list = productsInStock().filter(function (p) {
       if (ui.category && p.category !== ui.category) return false;
+      if (db.settings.useLocations && ui.location &&
+          !batchesOf(p.id).some(function (b) { return lotLocation(b) === ui.location; })) return false;
       return !q || L.normalizeName(p.name + ' ' + (p.brand || '')).indexOf(q) >= 0;
     });
     var nearest = {};
-    list.forEach(function (p) { nearest[p.id] = batchesOf(p.id)[0].exp; });
+    list.forEach(function (p) {
+      var first = batchesOf(p.id)[0];
+      nearest[p.id] = first.frozen ? '9999-12-31' : first.exp; // tout congelé : en fin de liste
+    });
     list.sort(function (a, b) {
       if (ui.sort === 'name') return a.name.localeCompare(b.name, 'fr');
       return nearest[a.id] < nearest[b.id] ? -1 : nearest[a.id] > nearest[b.id] ? 1 : 0;
@@ -1166,6 +1497,17 @@
           return '<button class="chip' + (ui.category === c ? ' on' : '') + '" data-action="cat" data-cat="' + esc(c) + '">' + esc(c) + '</button>';
         }).join('') + '</div>';
     }
+    if (db.settings.useLocations) {
+      html += '<div class="chips"><button class="chip' + (ui.location ? '' : ' on') + '" data-action="loc" data-loc="">📍 Partout</button>' +
+        db.settings.locations.map(function (l) {
+          return '<button class="chip' + (ui.location === l ? ' on' : '') + '" data-action="loc" data-loc="' + esc(l) + '">' + esc(l) + '</button>';
+        }).join('') + '</div>';
+    }
+    var low = L.belowMinimum(db.products, db.batches);
+    if (low.length) {
+      html += '<button class="banner orange" data-action="tab" data-tab="shopping">🛒 Sous le stock minimum : ' +
+        esc(low.slice(0, 3).map(function (p) { return p.name; }).join(', ')) + (low.length > 3 ? '…' : '') + ' ›</button>';
+    }
     if (exp.length) {
       html += '<button class="banner ' + (anyExpired ? 'red' : 'orange') + '" data-action="tab" data-tab="expiring">⚠️ ' +
         (exp.length === 1 ? '1 lot ' : exp.length + ' lots ') + (anyExpired ? 'périmé(s) ou à consommer vite' : 'à consommer vite') + ' ›</button>';
@@ -1187,16 +1529,21 @@
     var html = '<div class="card">' +
       '<div class="row prod-head" data-action="toggle" data-id="' + p.id + '">' + thumb(p) +
       '<div class="grow"><div class="name">' + esc(p.name) + '</div>' +
-      '<div class="muted">' + esc(qty(total, p.unit)) + ' au total' + (lots.length > 1 ? ' · ' + lots.length + ' lots' : '') + '</div>' +
-      '<div style="margin-top:3px">' + expiryTag(lots[0].exp) + '</div></div>' +
+      '<div class="muted">' + esc(qty(total, p.unit)) + ' au total' + (lots.length > 1 ? ' · ' + lots.length + ' lots' : '') +
+      kcalInfo(p) + '</div>' +
+      '<div style="margin-top:3px">' + lotTag(lots[0]) + '</div></div>' +
       '<button class="icon-btn" data-action="use" data-id="' + p.id + '" title="Utiliser">➖</button>' +
       '</div>';
     if (open) {
       html += '<div class="lots">' + lots.map(function (b) {
-        return '<div class="row lot"><span class="dot ' + status(b.exp) + '"></span>' +
+        return '<div class="row lot"><span class="dot ' + lotStatus(b) + '"></span>' +
           '<div class="grow" data-action="lot-edit" data-id="' + b.id + '"><b>' + esc(qty(b.qty, p.unit)) + '</b>' +
-          '<div class="muted">avant le ' + esc(fmtDate(b.exp)) + ' · ' + esc(L.expiryLabel(L.daysUntil(b.exp))) + '</div></div>' +
-          '<button class="icon-btn" data-action="lot-edit" data-id="' + b.id + '">✏️</button>' +
+          (b.opened && !b.frozen ? ' <span class="tag opened">entamé</span>' : '') +
+          '<div class="muted">' + (b.frozen
+            ? '❄️ congelé' + (b.frozenAt ? ' le ' + esc(fmtDate(b.frozenAt)) : '') + ' · la date ne compte pas'
+            : 'avant le ' + esc(fmtDate(b.exp)) + ' · ' + esc(L.expiryLabel(L.daysUntil(b.exp)))) +
+          (db.settings.useLocations ? ' · 📍 ' + esc(b.location || 'emplacement ?') : '') + '</div></div>' +
+          '<button class="icon-btn" data-action="lot-edit" data-id="' + b.id + '" title="Modifier, entamé, congeler">⋯</button>' +
           '<button class="icon-btn" data-action="lot-del" data-id="' + b.id + '">🗑</button></div>';
       }).join('') +
         '<div class="wrap" style="margin-top:6px">' +
@@ -1222,7 +1569,7 @@
       return '<div class="card pad row">' + thumb(p) +
         '<div class="grow"><div class="name">' + esc(p.name) + '</div>' +
         '<div class="muted">' + esc(qty(b.qty, p.unit)) + ' · ' + esc(fmtDate(b.exp)) + '</div>' +
-        '<div style="margin-top:3px">' + expiryTag(b.exp) + '</div></div>' +
+        '<div style="margin-top:3px">' + lotTag(b) + '</div></div>' +
         '<div class="right"><button class="btn small" data-action="exp-use" data-id="' + b.id + '">Utilisé</button>' +
         '<div style="height:8px"></div><button class="btn small danger" data-action="exp-trash" data-id="' + b.id + '">Jeté</button></div></div>';
     }
@@ -1238,9 +1585,12 @@
     return db.recipes.slice().sort(function (a, b) { return a.name.localeCompare(b.name, 'fr'); }).map(function (r) {
       var m = missingCount(r);
       var n = r.ingredients.length;
+      var k = L.recipeKcal(r, db.products);
       return '<div class="card pad row" data-action="recipe-open" data-id="' + r.id + '">' + thumb(r) +
         '<div class="grow"><div class="name">' + esc(r.name) + '</div><div class="muted">' + plural(n, 'ingrédient') +
-        (n ? (m ? ' · ' + m + ' manquant' + (m > 1 ? 's' : '') : ' · tout est en stock') : '') + '</div></div>' +
+        (r.servings ? ' · ' + plural(r.servings, 'personne') : '') +
+        (n ? (m ? ' · ' + m + ' manquant' + (m > 1 ? 's' : '') : ' · tout est en stock') : '') + '</div>' +
+        (k.total > 0 && k.perPerson ? '<div class="kcal">≈ ' + kcalText(k.perPerson) + ' par personne</div>' : '') + '</div>' +
         '<span style="font-size:22px">' + (n && !m ? '✅' : '🧺') + '</span></div>';
     }).join('');
   }
@@ -1253,15 +1603,31 @@
       '<button class="btn" data-action="recipe-cook" data-id="' + r.id + '">🍳 Je l\'ai cuisinée</button>' +
       '<button class="btn" data-action="recipe-edit" data-id="' + r.id + '">✏️ Modifier</button>' +
       '<button class="btn danger" data-action="recipe-del" data-id="' + r.id + '">Supprimer</button></div>';
+    var people = ui.people[r.id] || r.servings || 0;
+    var f = L.portionFactor(r, people);
+    var k = L.recipeKcal(r, db.products, people || undefined);
+    html += '<div class="card pad">' +
+      (r.servings
+        ? '<div class="row"><b class="grow">Pour</b><button class="icon-btn" data-action="r-people" data-id="' + r.id + '" data-delta="-1">➖</button>' +
+          '<b>' + plural(people, 'personne') + '</b><button class="icon-btn" data-action="r-people" data-id="' + r.id + '" data-delta="1">➕</button></div>'
+        : '<div class="muted">Indique le nombre de personnes dans « Modifier » pour ajuster les quantités.</div>') +
+      '<div style="margin-top:6px">🔥 ' + (k.total > 0
+        ? '<b>≈ ' + kcalText(k.total) + '</b> au total' + (k.perPerson ? ' · <b>' + kcalText(k.perPerson) + '</b> par personne' : '')
+        : 'Calories inconnues') +
+      (k.unknown ? '<div class="muted">' + plural(k.unknown, 'ingrédient') + ' sans calories connues (non compté' + (k.unknown > 1 ? 's' : '') + ')</div>' : '') +
+      '</div></div>';
     html += '<h2>Ingrédients</h2><div class="card">';
     if (!r.ingredients.length) html += '<div class="list-item muted">Aucun ingrédient.</div>';
-    r.ingredients.forEach(function (ing) {
+    r.ingredients.forEach(function (ing0) {
+      var ing = { name: ing0.name, qty: ing0.qty * f, unit: ing0.unit, productId: ing0.productId };
       var p = L.matchProduct(ing, db.products);
+      var ik = L.kcalOf(p, ing.qty, ing.unit);
       var base = L.baseUnit(ing.unit);
       var ok = p && L.availableQuantity(p, db.batches, base) + 1e-9 >= L.convert(ing.qty, ing.unit, base);
       html += '<div class="list-item row"><span style="font-size:20px">' + (ok ? '✅' : '❌') + '</span><div class="grow">' +
         '<b>' + esc(qty(ing.qty, ing.unit)) + '</b> — ' + esc(ing.name) +
-        '<div class="muted">' + (p ? 'En stock : ' + esc(qty(L.availableQuantity(p, db.batches, p.unit), p.unit)) + ' (' + esc(p.name) + ')' : 'Pas dans le stock') + '</div></div></div>';
+        '<div class="muted">' + (p ? 'En stock : ' + esc(qty(L.availableQuantity(p, db.batches, p.unit), p.unit)) + ' (' + esc(p.name) + ')' : 'Pas dans le stock') +
+        (ik !== null ? ' · ' + kcalText(ik) : '') + '</div></div></div>';
     });
     html += '</div><h2>Préparation</h2><div class="card pad" style="white-space:pre-wrap">' + (r.instructions ? esc(r.instructions) : '—') + '</div>';
     return html;
@@ -1318,9 +1684,18 @@
     if (!entries.length) html += '<div class="list-item muted" style="padding-top:0">—</div>';
     entries.forEach(function (e) {
       var r = recipeById(e.recipeId);
+      var n = e.people || r.servings;
+      var sub = [];
+      if (showDate && e.date) sub.push(fmtDay(e.date));
+      if (n) {
+        var kk = L.recipeKcal(r, db.products, n);
+        sub.push(n + ' pers.' + (kk.perPerson && kk.total > 0 ? ' · ' + kcalText(kk.perPerson) + '/pers.' : ''));
+      }
+      if (e.done) sub.push('Faite');
       html += '<div class="list-item row">' +
         '<div class="grow" data-action="plan-open" data-id="' + r.id + '"><span class="' + (e.done ? 'done' : '') + '">' + esc(r.name) + '</span>' +
-        (showDate && e.date ? '<div class="muted">' + esc(fmtDay(e.date)) + '</div>' : (e.done ? '<div class="muted">Faite</div>' : '')) + '</div>' +
+        (sub.length ? '<div class="muted">' + esc(sub.join(' · ')) + '</div>' : '') + '</div>' +
+        (e.done ? '' : '<button class="icon-btn" data-action="plan-people" data-id="' + e.id + '" title="Nombre de personnes">👥</button>') +
         (e.done ? '' : '<button class="btn small" data-action="plan-done" data-id="' + e.id + '">✓ Faite</button>') +
         '<button class="icon-btn" data-action="plan-del" data-id="' + e.id + '">✕</button></div>';
     });
@@ -1344,11 +1719,12 @@
     html += '<div class="card">' + items.map(function (i) {
       var sub = [];
       if (i.qty !== null && i.qty !== undefined) sub.push(qty(i.qty, i.unit || 'pièce'));
-      if (i.auto) sub.push('pour le planning');
+      if (i.auto) sub.push(i.why === 'min' ? 'stock minimum' : (i.why === 'both' ? 'planning + stock minimum' : 'pour le planning'));
       return '<div class="list-item row">' +
         '<input type="checkbox" class="check" data-action="shop-check" data-id="' + i.id + '"' + (i.checked ? ' checked' : '') + '>' +
         '<div class="grow" data-action="shop-check" data-id="' + i.id + '"><span class="' + (i.checked ? 'done' : '') + '">' + esc(i.name) + '</span>' +
         (sub.length ? '<div class="muted">' + esc(sub.join(' · ')) + '</div>' : '') + '</div>' +
+        (i.checked ? '<button class="btn small" data-action="shop-stock" data-id="' + i.id + '">＋ Stock</button>' : '') +
         '<button class="icon-btn" data-action="shop-del" data-id="' + i.id + '">🗑</button></div>';
     }).join('') + '</div>';
     return html;
@@ -1373,6 +1749,17 @@
         (used[c] || s.categories.length <= 1 ? '<span class="muted" style="width:44px;text-align:center">—</span>'
           : '<button class="icon-btn" data-action="cat-del" data-i="' + i + '">🗑</button>') + '</div>';
     }).join('') + '<div class="list-item"><button class="btn small" data-action="cat-add">＋ Ajouter une catégorie</button></div></div>';
+    html += '<h2>Emplacements</h2><div class="card">' +
+      '<label class="list-item row" style="font-size:17px"><input type="checkbox" class="check" data-action="loc-toggle"' + (s.useLocations ? ' checked' : '') + '>' +
+      '<span class="grow">Ranger les produits par emplacement (frigo, congélateur, placard…)</span></label>' +
+      (s.useLocations ? s.locations.map(function (l, i) {
+        var usedL = db.batches.some(function (b) { return b.location === l; });
+        return '<div class="list-item row"><div class="grow">📍 ' + esc(l) + '</div>' +
+          '<button class="icon-btn" data-action="loc-rename" data-i="' + i + '">✏️</button>' +
+          (usedL || s.locations.length <= 1 ? '<span class="muted" style="width:44px;text-align:center">—</span>'
+            : '<button class="icon-btn" data-action="loc-del" data-i="' + i + '">🗑</button>') + '</div>';
+      }).join('') + '<div class="list-item"><button class="btn small" data-action="loc-add">＋ Ajouter un emplacement</button></div>' : '') +
+      '</div>';
     html += '<h2>Sauvegarde</h2><div class="card pad">' +
       '<p style="margin-top:0">Tes données sont enregistrées uniquement sur cet iPad, dans Safari. ' +
       '<b>Ne vide pas l\'historique / les données de sites de Safari</b>, et exporte une sauvegarde de temps en temps.</p>' +
@@ -1463,7 +1850,24 @@
     'recipe-back': function () { ui.recipeId = null; render(); },
     'recipe-edit': function (el) { openRecipeForm(el.getAttribute('data-id')); },
     'recipe-plan': function (el) { planRecipe(recipeById(el.getAttribute('data-id'))); },
-    'recipe-cook': function (el) { cookRecipe(recipeById(el.getAttribute('data-id')), null); },
+    'recipe-cook': function (el) {
+      var r = recipeById(el.getAttribute('data-id'));
+      cookRecipe(r, null, ui.people[r.id] || r.servings || null);
+    },
+    'r-people': function (el) {
+      var r = recipeById(el.getAttribute('data-id'));
+      var n = (ui.people[r.id] || r.servings || 1) + Number(el.getAttribute('data-delta'));
+      ui.people[r.id] = Math.max(1, Math.min(50, n));
+      render();
+    },
+    'plan-people': function (el) {
+      var e = find(db.plan, el.getAttribute('data-id'));
+      var r = recipeById(e.recipeId);
+      askQuantity('Pour combien de personnes ?', 'personnes', e.people || r.servings || 2, null, function (n) {
+        e.people = Math.max(1, Math.round(n));
+        commit();
+      });
+    },
     'recipe-del': function (el) {
       var r = recipeById(el.getAttribute('data-id'));
       askConfirm('Supprimer la recette ?', '« ' + r.name + ' » sera aussi retirée du planning.', 'Supprimer', function () {
@@ -1481,7 +1885,7 @@
     'plan-add': function (el) {
       var day = el.getAttribute('data-day') || null;
       pickRecipe('Choisir une recette', function (r) {
-        db.plan.push({ id: newId(), recipeId: r.id, date: day, done: false });
+        db.plan.push({ id: newId(), recipeId: r.id, date: day, done: false, people: r.servings || null });
         commit();
       });
     },
@@ -1511,7 +1915,10 @@
       i.checked = !i.checked;
       if (ev && ev.target && ev.target.type === 'checkbox') ev.target.checked = i.checked;
       commit();
+      // Article acheté : proposer de le ranger dans le stock (sans obligation).
+      if (i.checked) showToast(i.name + ' acheté', function () { shoppingToStock(i.id); }, 'Ajouter au stock');
     },
+    'shop-stock': function (el) { shoppingToStock(el.getAttribute('data-id')); },
     'shop-del': function (el) {
       var id = el.getAttribute('data-id');
       db.shopping = db.shopping.filter(function (i) { return i.id !== id; });
@@ -1545,6 +1952,36 @@
       });
     },
     'cat-del': function (el) { db.settings.categories.splice(Number(el.getAttribute('data-i')), 1); commit(); },
+    'loc': function (el) { ui.location = el.getAttribute('data-loc') || null; render(); },
+    'loc-toggle': function (el, ev) {
+      db.settings.useLocations = !db.settings.useLocations;
+      if (ev && ev.target && ev.target.type === 'checkbox') ev.target.checked = db.settings.useLocations;
+      ui.location = null;
+      commit();
+    },
+    'loc-add': function () {
+      askText('Nouvel emplacement', '', function (n) {
+        if (db.settings.locations.indexOf(n) >= 0) return;
+        db.settings.locations.push(n);
+        commit();
+      });
+    },
+    'loc-rename': function (el) {
+      var i = Number(el.getAttribute('data-i'));
+      var old = db.settings.locations[i];
+      askText("Renommer l'emplacement", old, function (n) {
+        if (n === old || db.settings.locations.indexOf(n) >= 0) return;
+        db.settings.locations[i] = n;
+        db.batches.forEach(function (b) { if (b.location === old) b.location = n; });
+        if (ui.location === old) ui.location = n;
+        commit();
+      });
+    },
+    'loc-del': function (el) { db.settings.locations.splice(Number(el.getAttribute('data-i')), 1); commit(); },
+    'f-usedate': function (el) {
+      $('f-date').value = el.getAttribute('data-key');
+      $('f-ocr').innerHTML = '✅ Date reprise : ' + esc(fmtDate(el.getAttribute('data-key')));
+    },
     'export': openExport,
     'import': openImport
   };
@@ -1585,6 +2022,11 @@
         var nameEl = $('f-name') || $('p-name') || $('r-name');
         $('f-photo-prev').innerHTML = thumb({ name: nameEl ? nameEl.value : '', photo: data }, true);
       });
+    } else if ((t.id === 'f-frozen' || t.id === 'f-cat') && $('f-loc')) {
+      $('f-loc').value = defaultLocation($('f-cat').value, $('f-frozen').checked);
+    } else if (t.id === 'f-ocr-file' && t.files && t.files[0]) {
+      readDateFromPhoto(t.files[0]);
+      t.value = '';
     } else if (t.id === 'i-file' && t.files && t.files[0]) {
       var reader = new FileReader();
       reader.onload = function () { $('i-text').value = reader.result; };

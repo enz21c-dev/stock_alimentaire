@@ -52,3 +52,5 @@ setup_log.txt
 setup.ps1
 lancer_installation.bat
 cahier_des_charges_stock_alimentaire.md
+
+tools/cache/

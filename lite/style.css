@@ -183,3 +183,11 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--green); bor
 #scan-count { color: #fff; font-weight: 700; text-shadow: 0 1px 3px #000; }
 #scan-msg { position: absolute; left: 16px; right: 16px; bottom: 40px; text-align: center; color: #fff; text-shadow: 0 1px 4px #000; }
 #scan-msg .btn { margin-top: 12px; }
+
+/* ---- lots congelés / entamés ---- */
+.tag.frozen { color: #1565C0; background: #E3F2FD; }
+.tag.opened { color: #6A1B9A; background: #F3E5F5; }
+.dot.frozen { background: #1E88E5; }
+.kcal { color: var(--muted); font-size: 14px; }
+.people { display: inline-flex; align-items: center; }
+.people input { width: 70px; text-align: center; margin: 0 6px; }

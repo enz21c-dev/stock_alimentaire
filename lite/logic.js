@@ -104,8 +104,10 @@
   }
 
   // ---------------------------------------------------------------- FEFO
+  /** Lots du plus urgent au moins urgent ; les lots congelés passent en dernier. */
   function sortFefo(batches) {
     return batches.slice().sort(function (a, b) {
+      if (!!a.frozen !== !!b.frozen) return a.frozen ? 1 : -1;
       if (a.exp !== b.exp) return a.exp < b.exp ? -1 : 1;
       return (a.added || '') < (b.added || '') ? -1 : 1;
     });
@@ -148,7 +150,7 @@
     var total = 0;
     batches.forEach(function (b) {
       if (b.productId !== p.id) return;
-      if (daysUntil(b.exp, today) < 0) return;
+      if (!b.frozen && daysUntil(b.exp, today) < 0) return;
       total += convert(b.qty, p.unit, unit) || 0;
     });
     return total;
@@ -163,6 +165,7 @@
       if (entry.done) return;
       var r = recipesById[entry.recipeId];
       if (!r) return;
+      var f = portionFactor(r, entry.people);
       r.ingredients.forEach(function (ing) {
         var p = matchProduct(ing, products);
         var base = baseUnit(ing.unit);
@@ -173,17 +176,21 @@
             unit: base,
             product: p,
             needed: 0,
-            available: p ? availableQuantity(p, batches, base, today) : 0
+            available: p ? availableQuantity(p, batches, base, today) : 0,
+            fromPlan: true
           };
           order.push(key);
         }
-        needs[key].needed += convert(ing.qty, ing.unit, base);
+        needs[key].needed += convert(ing.qty, ing.unit, base) * f;
       });
     });
-    var list = order.map(function (k) {
-      var n = needs[k];
+    return finishNeeds(order.map(function (k) { return needs[k]; }));
+  }
+
+  /** Calcule ce qui manque et trie (manquants d'abord, puis par nom). */
+  function finishNeeds(list) {
+    list.forEach(function (n) {
       n.missing = n.needed - n.available > 1e-9 ? n.needed - n.available : 0;
-      return n;
     });
     list.sort(function (a, b) {
       if ((a.missing > 0) !== (b.missing > 0)) return a.missing > 0 ? -1 : 1;
@@ -191,6 +198,35 @@
       return x < y ? -1 : x > y ? 1 : 0;
     });
     return list;
+  }
+
+  /** Ajoute les « stocks minimum » (p.minQty, dans l'unité du produit) aux besoins :
+   *  ce qu'il faut pour les recettes PLUS le minimum à garder. */
+  function addMinStock(needs, products, batches, today) {
+    var list = needs.slice();
+    products.forEach(function (p) {
+      if (!(p.minQty > 0)) return;
+      var base = baseUnit(p.unit);
+      var min = convert(p.minQty, p.unit, base);
+      var n = null;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].product && list[i].product.id === p.id && list[i].unit === base) { n = list[i]; break; }
+      }
+      if (!n) {
+        n = { name: p.name, unit: base, product: p, needed: 0, available: availableQuantity(p, batches, base, today) };
+        list.push(n);
+      }
+      n.needed += min;
+      n.min = true;
+    });
+    return finishNeeds(list);
+  }
+
+  /** Produits sous leur stock minimum. */
+  function belowMinimum(products, batches, today) {
+    return products.filter(function (p) {
+      return p.minQty > 0 && availableQuantity(p, batches, p.unit, today) + 1e-9 < p.minQty;
+    });
   }
 
   /** Liste de courses : garde le manuel et le coché, remplace les lignes
@@ -210,22 +246,32 @@
       var h = humanize(n.missing, n.unit);
       added.push({
         id: previous[normalizeName(n.name) + '|' + h[1]] || newId(),
-        name: n.name, qty: h[0], unit: h[1], checked: false, auto: true
+        name: n.name, qty: h[0], unit: h[1], checked: false, auto: true,
+        why: n.fromPlan && n.min ? 'both' : (n.min ? 'min' : 'plan')
       });
     });
     return added.concat(kept);
   }
 
   // ---------------------------------------------------------------- Open Food Facts
-  function mapOffCategory(tags) {
+  // Étiquettes trop générales ignorées (« plant-based-foods-and-BEVERAGES »
+  // classait des pâtes dans Boissons). Mêmes règles que tools/build_products.py.
+  var IGNORED_TAGS = ['en:plant-based-foods-and-beverages', 'en:plant-based-foods',
+    'en:beverages-and-beverages-preparations'];
+
+  function mapOffCategory(allTags) {
+    // aussi « fruit-based-foods-and-beverages », « vegetable-based-foods-and-beverages »…
+    var tags = allTags.filter(function (t) { return IGNORED_TAGS.indexOf(t) < 0 && t.indexOf('foods-and-beverages') < 0; });
     function has(keys) {
       return tags.some(function (t) { return keys.some(function (k) { return t.indexOf(k) >= 0; }); });
     }
     if (has(['frozen'])) return 'Surgelé';
-    if (has(['beverages', 'drinks', 'waters', 'juices', 'sodas', 'wines', 'beers'])) return 'Boissons';
+    if (has(['beverages', 'drinks', 'waters', 'juices', 'sodas', 'wines', 'beers', 'ciders',
+      'spirits', 'alcoholic', 'nectars', 'plant-milks'])) return 'Boissons';
     if (has(['canned'])) return 'Conserves';
     if (has(['dairies', 'dairy', 'yogurts', 'cheeses', 'meats', 'fresh', 'eggs', 'fishes',
-      'butters', 'creams', 'hams', 'sausages', 'refrigerated'])) return 'Frais';
+      'butters', 'creams', 'hams', 'sausages', 'refrigerated', 'chilled', 'charcuteries',
+      'poultries', 'seafood', 'fermented-milk'])) return 'Frais';
     if (!tags.length) return 'Autre';
     return 'Épicerie';
   }
@@ -244,6 +290,115 @@
     return [v, u];
   }
 
+  /** Contenance d'un emballage : « 4 x 125 g » → {count: 4, each: 125, unit: 'g'},
+   *  « 400 g » → {count: 1, each: 400, unit: 'g'}. null si illisible. */
+  function parsePack(s) {
+    if (!s) return null;
+    var t = String(s).toLowerCase().replace(/,/g, '.');
+    var m = /(?:(\d+)\s*[x×]\s*)?(\d+(?:\.\d+)?)\s*(kg|g|ml|cl|l)\b/.exec(t);
+    if (!m) return null;
+    var each = Number(m[2]);
+    var u = m[3];
+    if (u === 'cl') { each *= 10; u = 'ml'; }
+    if (u === 'l') u = 'L';
+    return { count: m[1] ? Number(m[1]) : 1, each: each, unit: u };
+  }
+
+  /** Quantité proposée au scan : un lot de 4 yaourts → 4 pièces ; un pot de 400 g → 400 g. */
+  function suggestQuantity(pack) {
+    if (!pack) return { qty: 1, unit: 'pièce' };
+    if (pack.count > 1) return { qty: pack.count, unit: 'pièce' };
+    return { qty: pack.each, unit: pack.unit };
+  }
+
+  /** Facteur des portions : recette pour 4, cuisinée pour 2 → 0,5. */
+  function portionFactor(recipe, people) {
+    var s = recipe && recipe.servings > 0 ? recipe.servings : 0;
+    return (s && people > 0) ? people / s : 1;
+  }
+
+  /** Calories d'une quantité d'un produit (null si inconnu).
+   *  p.kcal100 = kcal pour 100 g ou 100 ml ; p.packQty/p.packUnit = poids d'une pièce. */
+  function kcalOf(p, q, unit) {
+    if (!p || typeof p.kcal100 !== 'number') return null;
+    var base = baseUnit(unit);
+    var amount;
+    if (base === 'pièce') {
+      if (!(p.packQty > 0) || baseUnit(p.packUnit || 'pièce') === 'pièce') return null;
+      amount = q * convert(p.packQty, p.packUnit, baseUnit(p.packUnit));
+    } else {
+      amount = convert(q, unit, base);
+    }
+    return amount * p.kcal100 / 100;
+  }
+
+  /** Calories d'une recette pour `people` personnes (défaut : ses portions). */
+  function recipeKcal(recipe, products, people) {
+    var f = portionFactor(recipe, people);
+    var total = 0, unknown = 0;
+    recipe.ingredients.forEach(function (ing) {
+      var k = kcalOf(matchProduct(ing, products), ing.qty * f, ing.unit);
+      if (k === null) unknown++;
+      else total += k;
+    });
+    var persons = people > 0 ? people : (recipe.servings > 0 ? recipe.servings : 0);
+    return { total: total, perPerson: persons ? total / persons : null, unknown: unknown };
+  }
+
+  // ---------------------------------------------------------------- dates lues sur photo
+  var MONTH_WORDS = {
+    jan: 1, janv: 1, fev: 2, fevr: 2, feb: 2, mar: 3, mars: 3, avr: 4, apr: 4, mai: 5, may: 5,
+    jun: 6, juin: 6, jul: 7, juil: 7, aou: 8, aout: 8, aug: 8, sep: 9, sept: 9, oct: 10,
+    nov: 11, dec: 12
+  };
+
+  function validDate(y, m, d) {
+    if (m < 1 || m > 12 || d < 1) return false;
+    return d <= new Date(y, m, 0).getDate();
+  }
+  function fullYear(y) { return y < 100 ? 2000 + y : y; }
+
+  /** Cherche des dates COMPLÈTES dans un texte lu sur une photo (jamais devinées) :
+   *  12/05/2027, 12.05.27, 12-05-2027, 12 05 27, 12 MAI 2027, et « 05/2027 »
+   *  (date limite au mois → dernier jour du mois, signalé par monthOnly).
+   *  Ne garde que les dates entre 2 ans avant et 6 ans après aujourd'hui.
+   *  Renvoie [{key: 'AAAA-MM-JJ', text, monthOnly}] sans doublon. */
+  function findDates(text, today) {
+    var t = String(text || '').toLowerCase();
+    if (t.normalize) t = t.normalize('NFD').replace(/[̀-ͯ]/g, '');
+    var now = today || todayKey();
+    var min = addDays(now, -730), max = addDays(now, 6 * 366);
+    var found = [];
+    var seen = {};
+    function add(y, m, d, raw, monthOnly) {
+      y = fullYear(y);
+      if (!validDate(y, m, d)) return;
+      var key = y + '-' + pad(m) + '-' + pad(d);
+      if (key < min || key > max || seen[key]) return;
+      seen[key] = true;
+      found.push({ key: key, text: raw.trim(), monthOnly: !!monthOnly });
+    }
+    var m;
+    // jour / mois / année (séparateurs / . - ou espace)
+    var reNum = /(^|[^\d])(\d{1,2})\s?[\/.\-\s]\s?(\d{1,2})\s?[\/.\-\s]\s?(\d{4}|\d{2})(?!\d)/g;
+    while ((m = reNum.exec(t)) !== null) add(Number(m[4]), Number(m[3]), Number(m[2]), m[0], false);
+    // jour + mois en lettres + année
+    var reWord = /(^|[^\d])(\d{1,2})\s*([a-z]{3,5})\.?\s*(\d{4}|\d{2})(?!\d)/g;
+    while ((m = reWord.exec(t)) !== null) {
+      var mo = MONTH_WORDS[m[3]];
+      if (mo) add(Number(m[4]), mo, Number(m[2]), m[0], false);
+    }
+    // mois / année seuls (ex. « à consommer de préférence avant fin 06/2027 »)
+    if (!found.length) {
+      var reMonth = /(^|[^\d\/.\-])(\d{1,2})\s?[\/.\-]\s?(\d{4})(?![\d\/.\-])/g;
+      while ((m = reMonth.exec(t)) !== null) {
+        var y = Number(m[3]), mm = Number(m[2]);
+        if (mm >= 1 && mm <= 12) add(y, mm, new Date(y, mm, 0).getDate(), m[0], true);
+      }
+    }
+    return found;
+  }
+
   var Logic = {
     UNITS: UNITS, DEFAULT_CATEGORIES: DEFAULT_CATEGORIES,
     baseUnit: baseUnit, convert: convert, humanize: humanize, formatNumber: formatNumber,
@@ -253,7 +408,9 @@
     sortFefo: sortFefo, consumeFefo: consumeFefo, matchProduct: matchProduct,
     availableQuantity: availableQuantity, computeNeeds: computeNeeds,
     regenerateShopping: regenerateShopping, mapOffCategory: mapOffCategory,
-    parseOffQuantity: parseOffQuantity
+    parseOffQuantity: parseOffQuantity, parsePack: parsePack, suggestQuantity: suggestQuantity,
+    portionFactor: portionFactor, kcalOf: kcalOf, recipeKcal: recipeKcal,
+    addMinStock: addMinStock, belowMinimum: belowMinimum, findDates: findDates
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = Logic;
   else root.Logic = Logic;
