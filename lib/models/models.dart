@@ -2,6 +2,8 @@
 //
 // Toutes les dates « jour » (péremption, planning) sont stockées au format
 // texte AAAA-MM-JJ pour éviter les problèmes de fuseau horaire.
+// Les champs ajoutés après la version 1.0 sont facultatifs : les anciennes
+// données restent lisibles.
 
 import 'dart:math';
 
@@ -24,6 +26,8 @@ DateTime dateFromKey(String s) {
 }
 
 double _toDouble(Object? v) => v is num ? v.toDouble() : double.parse('$v');
+double? _toDoubleOrNull(Object? v) => v == null ? null : (v is num ? v.toDouble() : double.tryParse('$v'));
+DateTime? _keyOrNull(Object? v) => v is String && v.length >= 10 ? dateFromKey(v) : null;
 
 /// Un produit (ex. « Yaourt nature »). Il peut avoir plusieurs lots.
 class Product {
@@ -34,7 +38,11 @@ class Product {
   String category;
   String unit; // pièce, g, kg, ml, L
   String? photoUrl; // image Open Food Facts
-  String? photoData; // photo prise avec l'iPad (JPEG en base64)
+  String? photoData; // photo prise avec l'appareil (JPEG en base64)
+  double? kcal100; // calories pour 100 g ou 100 ml
+  double? packQty; // poids/volume d'une pièce (pour les calories), ex. 125
+  String? packUnit; // g, kg, ml, L
+  double? minQty; // stock minimum, dans l'unité du produit
 
   Product({
     String? id,
@@ -45,6 +53,10 @@ class Product {
     this.unit = 'pièce',
     this.photoUrl,
     this.photoData,
+    this.kcal100,
+    this.packQty,
+    this.packUnit,
+    this.minQty,
   }) : id = id ?? newId();
 
   Map<String, Object?> toJson() => {
@@ -56,6 +68,10 @@ class Product {
         'unit': unit,
         'photoUrl': photoUrl,
         'photoData': photoData,
+        'kcal100': kcal100,
+        'packQty': packQty,
+        'packUnit': packUnit,
+        'minQty': minQty,
       };
 
   factory Product.fromJson(Map<String, Object?> m) => Product(
@@ -67,6 +83,10 @@ class Product {
         unit: (m['unit'] as String?) ?? 'pièce',
         photoUrl: m['photoUrl'] as String?,
         photoData: m['photoData'] as String?,
+        kcal100: _toDoubleOrNull(m['kcal100']),
+        packQty: _toDoubleOrNull(m['packQty']),
+        packUnit: m['packUnit'] as String?,
+        minQty: _toDoubleOrNull(m['minQty']),
       );
 }
 
@@ -77,6 +97,11 @@ class Batch {
   double quantity; // dans l'unité du produit
   DateTime expirationDate;
   DateTime addedDate;
+  bool opened; // entamé
+  DateTime? openedAt;
+  bool frozen; // congelé : la date de péremption ne compte plus
+  DateTime? frozenAt;
+  String? location; // emplacement (frigo, congélateur…), facultatif
 
   Batch({
     String? id,
@@ -84,17 +109,16 @@ class Batch {
     required this.quantity,
     required DateTime expirationDate,
     DateTime? addedDate,
+    this.opened = false,
+    this.openedAt,
+    this.frozen = false,
+    this.frozenAt,
+    this.location,
   })  : id = id ?? newId(),
         expirationDate = dateOnly(expirationDate),
         addedDate = addedDate ?? DateTime.now();
 
-  Batch copy() => Batch(
-        id: id,
-        productId: productId,
-        quantity: quantity,
-        expirationDate: expirationDate,
-        addedDate: addedDate,
-      );
+  Batch copy() => Batch.fromJson(toJson());
 
   Map<String, Object?> toJson() => {
         'id': id,
@@ -102,6 +126,11 @@ class Batch {
         'quantity': quantity,
         'expirationDate': dateToKey(expirationDate),
         'addedDate': addedDate.toIso8601String(),
+        'opened': opened,
+        'openedAt': openedAt == null ? null : dateToKey(openedAt!),
+        'frozen': frozen,
+        'frozenAt': frozenAt == null ? null : dateToKey(frozenAt!),
+        'location': location,
       };
 
   factory Batch.fromJson(Map<String, Object?> m) => Batch(
@@ -110,6 +139,11 @@ class Batch {
         quantity: _toDouble(m['quantity']),
         expirationDate: dateFromKey(m['expirationDate'] as String),
         addedDate: DateTime.tryParse('${m['addedDate']}') ?? DateTime.now(),
+        opened: (m['opened'] as bool?) ?? false,
+        openedAt: _keyOrNull(m['openedAt']),
+        frozen: (m['frozen'] as bool?) ?? false,
+        frozenAt: _keyOrNull(m['frozenAt']),
+        location: m['location'] as String?,
       );
 }
 
@@ -127,6 +161,9 @@ class RecipeIngredient {
     this.unit = 'pièce',
     this.productId,
   });
+
+  RecipeIngredient scaled(double f) =>
+      RecipeIngredient(name: name, quantity: quantity * f, unit: unit, productId: productId);
 
   Map<String, Object?> toJson() => {
         'name': name,
@@ -149,6 +186,7 @@ class Recipe {
   List<RecipeIngredient> ingredients;
   String instructions;
   String? photoData;
+  int? servings; // nombre de personnes pour les quantités saisies
 
   Recipe({
     String? id,
@@ -156,6 +194,7 @@ class Recipe {
     List<RecipeIngredient>? ingredients,
     this.instructions = '',
     this.photoData,
+    this.servings,
   })  : id = id ?? newId(),
         ingredients = ingredients ?? [];
 
@@ -165,6 +204,7 @@ class Recipe {
         'ingredients': ingredients.map((i) => i.toJson()).toList(),
         'instructions': instructions,
         'photoData': photoData,
+        'servings': servings,
       };
 
   factory Recipe.fromJson(Map<String, Object?> m) => Recipe(
@@ -175,6 +215,7 @@ class Recipe {
             .toList(),
         instructions: (m['instructions'] as String?) ?? '',
         photoData: m['photoData'] as String?,
+        servings: (m['servings'] as num?)?.toInt(),
       );
 }
 
@@ -184,8 +225,9 @@ class MealPlanEntry {
   String recipeId;
   DateTime? date;
   bool done;
+  int? people; // nombre de personnes (null = celui de la recette)
 
-  MealPlanEntry({String? id, required this.recipeId, DateTime? date, this.done = false})
+  MealPlanEntry({String? id, required this.recipeId, DateTime? date, this.done = false, this.people})
       : id = id ?? newId(),
         date = date == null ? null : dateOnly(date);
 
@@ -194,6 +236,7 @@ class MealPlanEntry {
         'recipeId': recipeId,
         'date': date == null ? null : dateToKey(date!),
         'done': done,
+        'people': people,
       };
 
   factory MealPlanEntry.fromJson(Map<String, Object?> m) => MealPlanEntry(
@@ -201,6 +244,7 @@ class MealPlanEntry {
         recipeId: m['recipeId'] as String,
         date: m['date'] == null ? null : dateFromKey(m['date'] as String),
         done: (m['done'] as bool?) ?? false,
+        people: (m['people'] as num?)?.toInt(),
       );
 }
 
@@ -211,7 +255,8 @@ class ShoppingItem {
   double? quantity;
   String? unit;
   bool checked;
-  bool auto; // true = générée depuis le planning
+  bool auto; // true = générée automatiquement
+  String? why; // 'plan', 'min' ou 'both' (lignes automatiques)
 
   ShoppingItem({
     String? id,
@@ -220,6 +265,7 @@ class ShoppingItem {
     this.unit,
     this.checked = false,
     this.auto = false,
+    this.why,
   }) : id = id ?? newId();
 
   Map<String, Object?> toJson() => {
@@ -229,6 +275,7 @@ class ShoppingItem {
         'unit': unit,
         'checked': checked,
         'auto': auto,
+        'why': why,
       };
 
   factory ShoppingItem.fromJson(Map<String, Object?> m) => ShoppingItem(
@@ -238,28 +285,42 @@ class ShoppingItem {
         unit: m['unit'] as String?,
         checked: (m['checked'] as bool?) ?? false,
         auto: (m['auto'] as bool?) ?? false,
+        why: m['why'] as String?,
       );
 }
 
 const defaultCategories = ['Frais', 'Surgelé', 'Épicerie', 'Conserves', 'Boissons', 'Autre'];
+const defaultLocations = ['Frigo', 'Congélateur', 'Placard', 'Cave'];
 
 class Settings {
   int alertDays;
   List<String> categories;
   bool planByDay; // true = recette par jour, false = liste libre
+  bool useLocations; // emplacements activés
+  List<String> locations;
 
-  Settings({this.alertDays = 3, List<String>? categories, this.planByDay = true})
-      : categories = categories ?? List.of(defaultCategories);
+  Settings({
+    this.alertDays = 3,
+    List<String>? categories,
+    this.planByDay = true,
+    this.useLocations = false,
+    List<String>? locations,
+  })  : categories = categories ?? List.of(defaultCategories),
+        locations = locations ?? List.of(defaultLocations);
 
   Map<String, Object?> toJson() => {
         'alertDays': alertDays,
         'categories': categories,
         'planByDay': planByDay,
+        'useLocations': useLocations,
+        'locations': locations,
       };
 
   factory Settings.fromJson(Map<String, Object?> m) => Settings(
         alertDays: (m['alertDays'] as num?)?.toInt() ?? 3,
         categories: (m['categories'] as List?)?.cast<String>().toList(),
         planByDay: (m['planByDay'] as bool?) ?? true,
+        useLocations: (m['useLocations'] as bool?) ?? false,
+        locations: (m['locations'] as List?)?.cast<String>().toList(),
       );
 }

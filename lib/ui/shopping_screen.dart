@@ -3,7 +3,26 @@ import 'package:material_ui/material_ui.dart';
 import '../data/app_state.dart';
 import '../logic/units.dart';
 import '../models/models.dart';
+import 'add_article_screen.dart';
 import 'common.dart';
+
+/// Ouvre la fiche d'ajout préremplie avec un article acheté ; il quitte la
+/// liste une fois rangé dans le stock.
+void shoppingToStock(BuildContext context, ShoppingItem i) {
+  final state = AppScope.read(context);
+  Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (_) => AddArticleScreen(
+        product: state.productByName(i.name),
+        prefillName: i.name,
+        prefillQty: i.quantity,
+        prefillUnit: i.unit,
+        onAdded: () => state.deleteShoppingItems([i.id]),
+      ),
+    ),
+  );
+}
 
 class ShoppingScreen extends StatefulWidget {
   const ShoppingScreen({super.key});
@@ -135,6 +154,10 @@ class _ShoppingScreenState extends State<ShoppingScreen> {
                           onChanged: (v) {
                             i.checked = v ?? false;
                             state.saveShoppingItem(i);
+                            // Article acheté : proposer de le ranger dans le stock (sans obligation).
+                            if (i.checked) {
+                              showAction(context, '${i.name} acheté', 'Ajouter au stock', () => shoppingToStock(context, i));
+                            }
                           },
                           title: Text(
                             i.name,
@@ -149,9 +172,20 @@ class _ShoppingScreenState extends State<ShoppingScreen> {
                               ? null
                               : Text([
                                   if (i.quantity != null) formatQty(i.quantity!, i.unit ?? 'pièce'),
-                                  if (i.auto) 'pour le planning',
+                                  if (i.auto)
+                                    i.why == 'min'
+                                        ? 'stock minimum'
+                                        : (i.why == 'both' ? 'planning + stock minimum' : 'pour le planning'),
                                 ].join(' · ')),
-                          secondary: i.auto ? const Icon(Icons.calendar_month, size: 20) : null,
+                          secondary: i.checked
+                              ? IconButton(
+                                  tooltip: 'Ajouter au stock',
+                                  icon: const Icon(Icons.add_box_outlined),
+                                  onPressed: () => shoppingToStock(context, i),
+                                )
+                              : (i.auto
+                                  ? Icon(i.why == 'min' ? Icons.inventory_2_outlined : Icons.calendar_month, size: 20)
+                                  : null),
                         ),
                       ),
                   ]),

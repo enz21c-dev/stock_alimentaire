@@ -42,7 +42,7 @@ class _PlanningScreenState extends State<PlanningScreen> {
     final state = AppScope.read(context);
     final r = await _pickRecipe(context);
     if (r == null) return;
-    await state.savePlanEntry(MealPlanEntry(recipeId: r.id, date: date));
+    await state.savePlanEntry(MealPlanEntry(recipeId: r.id, date: date, people: r.servings));
     await state.refreshShoppingFromPlan();
   }
 
@@ -250,6 +250,15 @@ class _DaySection extends StatelessWidget {
           for (final e in entries)
             Builder(builder: (context) {
               final r = state.recipes[e.recipeId]!;
+              final n = e.people ?? r.servings;
+              final sub = <String>[
+                if (showDate && e.date != null) formatDay(e.date!),
+                if (n != null) () {
+                  final k = recipeKcal(r, state.products.values.toList(), people: n);
+                  return '$n pers.${k.total > 0 && k.perPerson != null ? ' · ${kcalText(k.perPerson!)}/pers.' : ''}';
+                }(),
+                if (e.done) 'Faite',
+              ];
               return ListTile(
                 dense: true,
                 leading: ProductAvatar(photoData: r.photoData, name: r.name, size: 36),
@@ -257,12 +266,23 @@ class _DaySection extends StatelessWidget {
                   r.name,
                   style: e.done ? const TextStyle(decoration: TextDecoration.lineThrough) : null,
                 ),
-                subtitle: showDate && e.date != null ? Text(formatDay(e.date!)) : (e.done ? const Text('Faite') : null),
+                subtitle: sub.isEmpty ? null : Text(sub.join(' · ')),
                 onTap: () => Navigator.push(
                   context,
                   MaterialPageRoute(builder: (_) => RecipeDetailScreen(recipeId: r.id)),
                 ),
                 trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (!e.done)
+                    IconButton(
+                      tooltip: 'Nombre de personnes',
+                      icon: const Icon(Icons.group_outlined),
+                      onPressed: () async {
+                        final p = await askPeople(context, n ?? 2);
+                        if (p == null) return;
+                        e.people = p;
+                        await state.savePlanEntry(e);
+                      },
+                    ),
                   if (!e.done)
                     TextButton.icon(
                       icon: const Icon(Icons.check),

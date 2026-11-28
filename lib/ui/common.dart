@@ -61,6 +61,57 @@ class ExpiryChip extends StatelessWidget {
   }
 }
 
+Widget _tag(String text, Color color) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.6)),
+      ),
+      child: Text(text, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600)),
+    );
+
+/// Étiquette « entamé ».
+class OpenedTag extends StatelessWidget {
+  const OpenedTag({super.key});
+  @override
+  Widget build(BuildContext context) => _tag('entamé', const Color(0xFF6A1B9A));
+}
+
+/// Étiquette d'un lot : « congelé » (pas de date), sinon la date + « entamé ».
+class LotTag extends StatelessWidget {
+  const LotTag(this.batch, {super.key, required this.alertDays});
+  final Batch batch;
+  final int alertDays;
+
+  @override
+  Widget build(BuildContext context) {
+    if (batch.frozen) {
+      return _tag('❄️ congelé${batch.frozenAt == null ? '' : ' le ${formatDate(batch.frozenAt!)}'}',
+          const Color(0xFF1565C0));
+    }
+    return Wrap(spacing: 6, children: [
+      ExpiryChip(batch.expirationDate, alertDays: alertDays),
+      if (batch.opened) const OpenedTag(),
+    ]);
+  }
+}
+
+/// « 1 378 kcal »
+String kcalText(double k) => '${NumberFormat.decimalPattern('fr_FR').format(k.round())} kcal';
+
+/// Message en bas avec un bouton d'action (ex. « Ajouter au stock »).
+void showAction(BuildContext context, String message, String label, VoidCallback onPressed) {
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.hideCurrentSnackBar();
+  messenger.showSnackBar(SnackBar(
+    content: Text(message),
+    duration: const Duration(seconds: 7),
+    persist: false,
+    action: SnackBarAction(label: label, onPressed: onPressed),
+  ));
+}
+
 final Map<String, Uint8List> _photoCache = {};
 
 Uint8List decodePhoto(String data) {

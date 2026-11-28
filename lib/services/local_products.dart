@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/services.dart';
 
+import '../logic/stock_logic.dart';
 import '../models/models.dart';
 import 'open_food_facts.dart';
 
@@ -41,7 +42,7 @@ class LocalProducts {
     return parseLine(code, line);
   }
 
-  /// Ligne : nom, marque, n° catégorie, contenance, fin de l'URL de la photo.
+  /// Ligne : nom, marque, n° catégorie, contenance, fin de l'URL de la photo, kcal/100 g.
   static OffProduct parseLine(String code, String line) {
     final f = line.split('\t');
     String at(int i) => i < f.length ? f[i] : '';
@@ -55,6 +56,10 @@ class LocalProducts {
       imageUrl: imageUrl(code, at(4)),
       quantity: q?.$1,
       unit: q?.$2,
+      quantityText: at(3).isEmpty ? null : at(3),
+      pack: parsePack(at(3)),
+      kcal100: double.tryParse(at(5)),
+      local: true,
     );
   }
 

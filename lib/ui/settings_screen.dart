@@ -151,6 +151,60 @@ class SettingsScreen extends StatelessWidget {
               await state.saveSettings();
             },
           ),
+          _header(context, 'Emplacements'),
+          SwitchListTile(
+            secondary: const Icon(Icons.place_outlined),
+            title: const Text('Ranger les produits par emplacement'),
+            subtitle: const Text('Frigo, congélateur, placard… (facultatif)'),
+            value: s.useLocations,
+            onChanged: (v) {
+              s.useLocations = v;
+              state.saveSettings();
+            },
+          ),
+          if (s.useLocations) ...[
+            for (final l in s.locations)
+              ListTile(
+                leading: const Icon(Icons.place),
+                title: Text(l),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    tooltip: 'Renommer',
+                    icon: const Icon(Icons.edit_outlined),
+                    onPressed: () async {
+                      final n = await _askName(context, "Renommer l'emplacement", l);
+                      if (n == null || n.isEmpty || n == l || s.locations.contains(n)) return;
+                      s.locations[s.locations.indexOf(l)] = n;
+                      for (final b in state.batches.values.where((b) => b.location == l)) {
+                        b.location = n;
+                        await state.saveBatch(b);
+                      }
+                      await state.saveSettings();
+                    },
+                  ),
+                  IconButton(
+                    tooltip: 'Supprimer',
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: state.batches.values.any((b) => b.location == l) || s.locations.length <= 1
+                        ? null
+                        : () {
+                            s.locations.remove(l);
+                            state.saveSettings();
+                          },
+                  ),
+                ]),
+              ),
+            ListTile(
+              leading: const Icon(Icons.add),
+              title: const Text('Ajouter un emplacement'),
+              onTap: () async {
+                final n = await _askName(context, 'Nouvel emplacement');
+                if (n == null || n.isEmpty || s.locations.contains(n)) return;
+                s.locations.add(n);
+                await state.saveSettings();
+              },
+            ),
+          ],
           _header(context, 'Sauvegarde'),
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16),

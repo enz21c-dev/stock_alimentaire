@@ -31,13 +31,16 @@ class RecipesScreen extends StatelessWidget {
                 itemBuilder: (_, i) {
                   final r = recipes[i];
                   final missing = recipeMissing(state, r);
+                  final k = recipeKcal(r, state.products.values.toList());
                   return Card(
                     child: ListTile(
                       leading: ProductAvatar(photoData: r.photoData, name: r.name),
                       title: Text(r.name, style: const TextStyle(fontWeight: FontWeight.w600)),
                       subtitle: Text(
                         '${r.ingredients.length} ingrédient${r.ingredients.length > 1 ? 's' : ''}'
-                        '${r.ingredients.isEmpty ? '' : missing == 0 ? ' · tout est en stock' : ' · $missing manquant${missing > 1 ? 's' : ''}'}',
+                        '${r.servings != null ? ' · ${r.servings} pers.' : ''}'
+                        '${r.ingredients.isEmpty ? '' : missing == 0 ? ' · tout est en stock' : ' · $missing manquant${missing > 1 ? 's' : ''}'}'
+                        '${k.total > 0 && k.perPerson != null ? '\n≈ ${kcalText(k.perPerson!)} par personne' : ''}',
                       ),
                       trailing: Icon(
                         missing == 0 ? Icons.check_circle : Icons.shopping_basket_outlined,
@@ -64,16 +67,26 @@ int recipeMissing(AppState state, Recipe r) => computeNeeds(
       batches: state.batches.values.toList(),
     ).where((n) => n.isMissing).length;
 
-class RecipeDetailScreen extends StatelessWidget {
+class RecipeDetailScreen extends StatefulWidget {
   const RecipeDetailScreen({super.key, required this.recipeId});
   final String recipeId;
 
   @override
+  State<RecipeDetailScreen> createState() => _RecipeDetailScreenState();
+}
+
+class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
+  int? _people;
+
+  @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
-    final r = state.recipes[recipeId];
+    final r = state.recipes[widget.recipeId];
     if (r == null) return const Scaffold();
     final products = state.products.values.toList();
+    final people = _people ?? r.servings;
+    final f = portionFactor(r, people);
+    final k = recipeKcal(r, products, people: people);
 
     return Scaffold(
       appBar: AppBar(title: Text(r.name), actions: [
@@ -107,20 +120,52 @@ class RecipeDetailScreen extends StatelessWidget {
             FilledButton.icon(
               icon: const Icon(Icons.calendar_month),
               label: const Text('Planifier'),
-              onPressed: () => addToPlan(context, r),
+              onPressed: () => addToPlan(context, r, people: people),
             ),
             OutlinedButton.icon(
               icon: const Icon(Icons.soup_kitchen),
               label: const Text("Je l'ai cuisinée"),
-              onPressed: () => cookRecipe(context, r),
+              onPressed: () => cookRecipe(context, r, people: people),
             ),
           ]),
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                if (r.servings != null)
+                  Row(children: [
+                    const Expanded(child: Text('Pour', style: TextStyle(fontWeight: FontWeight.w600))),
+                    IconButton(
+                      icon: const Icon(Icons.remove_circle_outline),
+                      onPressed: (people ?? 1) <= 1 ? null : () => setState(() => _people = (people ?? 1) - 1),
+                    ),
+                    Text('$people personne${(people ?? 1) > 1 ? 's' : ''}',
+                        style: const TextStyle(fontWeight: FontWeight.w600)),
+                    IconButton(
+                      icon: const Icon(Icons.add_circle_outline),
+                      onPressed: () => setState(() => _people = (people ?? 1) + 1),
+                    ),
+                  ])
+                else
+                  const Text('Indique le nombre de personnes dans « Modifier » pour ajuster les quantités.'),
+                const SizedBox(height: 4),
+                Text(k.total > 0
+                    ? '🔥 ≈ ${kcalText(k.total)} au total${k.perPerson != null ? ' · ${kcalText(k.perPerson!)} par personne' : ''}'
+                    : '🔥 Calories inconnues'),
+                if (k.unknown > 0)
+                  Text('${k.unknown} ingrédient${k.unknown > 1 ? 's' : ''} sans calories connues (non compté${k.unknown > 1 ? 's' : ''})',
+                      style: Theme.of(context).textTheme.bodySmall),
+              ]),
+            ),
+          ),
           const SizedBox(height: 16),
           Text('Ingrédients', style: Theme.of(context).textTheme.titleLarge),
           if (r.ingredients.isEmpty) const Text('Aucun ingrédient.'),
-          for (final ing in r.ingredients)
+          for (final ing in r.ingredients.map((i) => i.scaled(f)))
             Builder(builder: (context) {
               final p = matchProduct(ing, products);
+              final ik = kcalOf(p, ing.quantity, ing.unit);
               final base = baseUnit(ing.unit);
               final ok = p != null &&
                   availableQuantity(p, state.batches.values.toList(), base) + 1e-9 >=
@@ -132,7 +177,8 @@ class RecipeDetailScreen extends StatelessWidget {
                 title: Text('${formatQty(ing.quantity, ing.unit)} — ${ing.name}'),
                 subtitle: Text(p == null
                     ? 'Pas dans le stock'
-                    : 'En stock : ${formatQty(availableQuantity(p, state.batches.values.toList(), p.unit), p.unit)} (${p.name})'),
+                    : 'En stock : ${formatQty(availableQuantity(p, state.batches.values.toList(), p.unit), p.unit)} (${p.name})'
+                        '${ik != null ? ' · ${kcalText(ik)}' : ''}'),
               );
             }),
           const SizedBox(height: 16),
@@ -145,11 +191,19 @@ class RecipeDetailScreen extends StatelessWidget {
   }
 }
 
+/// Demande un nombre de personnes (null si annulé).
+Future<int?> askPeople(BuildContext context, int initial) async {
+  final n = await askQuantity(context, title: 'Pour combien de personnes ?', unit: 'personnes', initial: initial.toDouble());
+  return n == null ? null : (n.round() < 1 ? 1 : n.round());
+}
+
 /// Ajoute une recette au planning (jour précis ou liste libre selon le mode).
-Future<void> addToPlan(BuildContext context, Recipe r) async {
+Future<void> addToPlan(BuildContext context, Recipe r, {int? people}) async {
   final state = AppScope.read(context);
+  final n = await askPeople(context, people ?? r.servings ?? 2);
+  if (n == null || !context.mounted) return;
   if (!state.settings.planByDay) {
-    await state.savePlanEntry(MealPlanEntry(recipeId: r.id));
+    await state.savePlanEntry(MealPlanEntry(recipeId: r.id, people: n));
     await state.refreshShoppingFromPlan();
     if (context.mounted) showMessage(context, '« ${r.name} » ajoutée au planning');
     return;
@@ -185,19 +239,21 @@ Future<void> addToPlan(BuildContext context, Recipe r) async {
     ),
   );
   if (day == null) return;
-  await state.savePlanEntry(MealPlanEntry(recipeId: r.id, date: day));
+  await state.savePlanEntry(MealPlanEntry(recipeId: r.id, date: day, people: n));
   await state.refreshShoppingFromPlan();
   if (context.mounted) showMessage(context, '« ${r.name} » prévue le ${formatDay(day).toLowerCase()}');
 }
 
 /// Valide une recette cuisinée : propose (sans jamais l'imposer) de retirer
 /// ses ingrédients du stock. [entry] = l'entrée du planning à marquer « faite ».
-Future<void> cookRecipe(BuildContext context, Recipe r, {MealPlanEntry? entry}) async {
+Future<void> cookRecipe(BuildContext context, Recipe r, {MealPlanEntry? entry, int? people}) async {
   final state = AppScope.read(context);
   final products = state.products.values.toList();
+  final n = entry?.people ?? people;
+  final f = portionFactor(r, n);
   final lines = <Widget>[];
   var anyInStock = false;
-  for (final ing in r.ingredients) {
+  for (final ing in r.ingredients.map((i) => i.scaled(f))) {
     final p = matchProduct(ing, products);
     final inStock = p != null && state.totalOf(p.id) > 0 && convert(ing.quantity, ing.unit, p.unit) != null;
     anyInStock |= inStock;
@@ -218,6 +274,7 @@ Future<void> cookRecipe(BuildContext context, Recipe r, {MealPlanEntry? entry}) 
       title: Text('« ${r.name} » est faite ?'),
       content: SingleChildScrollView(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          if (n != null) Text('Pour $n personne${n > 1 ? 's' : ''}', style: Theme.of(c).textTheme.bodySmall),
           Text(anyInStock ? 'Retirer ces quantités du stock ?' : 'Aucun ingrédient de cette recette n\'est en stock.'),
           const SizedBox(height: 8),
           ...lines,
@@ -237,7 +294,7 @@ Future<void> cookRecipe(BuildContext context, Recipe r, {MealPlanEntry? entry}) 
     await state.savePlanEntry(entry);
   }
   if (choice == 'consume') {
-    final snap = await state.consumeRecipe(r);
+    final snap = await state.consumeRecipe(r, people: n);
     if (entry != null) {
       // L'annulation remet aussi la recette « à faire ».
       await state.refreshShoppingFromPlan();
@@ -289,6 +346,8 @@ class _IngRow {
 class _RecipeEditScreenState extends State<RecipeEditScreen> {
   late final _name = TextEditingController(text: widget.recipe?.name ?? '');
   late final _instructions = TextEditingController(text: widget.recipe?.instructions ?? '');
+  late final _servings = TextEditingController(
+      text: widget.recipe == null ? '4' : (widget.recipe!.servings?.toString() ?? ''));
   late String? _photo = widget.recipe?.photoData;
   late final List<_IngRow> _rows = [
     for (final i in widget.recipe?.ingredients ?? <RecipeIngredient>[])
@@ -306,6 +365,7 @@ class _RecipeEditScreenState extends State<RecipeEditScreen> {
   void dispose() {
     _name.dispose();
     _instructions.dispose();
+    _servings.dispose();
     for (final r in _rows) {
       r.name.dispose();
       r.qty.dispose();
@@ -335,7 +395,8 @@ class _RecipeEditScreenState extends State<RecipeEditScreen> {
       ..name = _name.text.trim()
       ..ingredients = ings
       ..instructions = _instructions.text.trim()
-      ..photoData = _photo;
+      ..photoData = _photo
+      ..servings = (parseNumber(_servings.text) ?? 0).round() > 0 ? parseNumber(_servings.text)!.round() : null;
     await state.saveRecipe(recipe);
     await state.refreshShoppingFromPlan();
     if (mounted) Navigator.pop(context);
@@ -385,6 +446,18 @@ class _RecipeEditScreenState extends State<RecipeEditScreen> {
                 ),
               ),
             ]),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: 260,
+              child: TextFormField(
+                controller: _servings,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Pour combien de personnes ?',
+                  helperText: 'Les quantités ci-dessous sont pour ce nombre',
+                ),
+              ),
+            ),
             const SizedBox(height: 24),
             Text('Ingrédients', style: Theme.of(context).textTheme.titleMedium),
             Text(

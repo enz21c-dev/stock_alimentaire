@@ -96,16 +96,44 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  /// Lots périmés ou périmant dans le délai d'alerte, du plus urgent au moins urgent.
+  /// Lots périmés ou périmant dans le délai d'alerte, du plus urgent au moins
+  /// urgent. Un lot congelé ne périme plus : pas d'alerte.
   List<Batch> get expiringBatches => sortFefo(batches.values.where(
-      (b) => daysUntil(b.expirationDate) <= settings.alertDays));
+      (b) => !b.frozen && daysUntil(b.expirationDate) <= settings.alertDays));
 
+  /// Besoins des recettes prévues (sans les stocks minimum).
   List<Need> get needs => computeNeeds(
         plan: plan.values,
         recipes: recipes,
         products: products.values.toList(),
         batches: batches.values.toList(),
       );
+
+  /// Besoins des recettes + stocks minimum (pour la liste de courses).
+  List<Need> get shoppingNeeds =>
+      addMinStock(needs, products.values.toList(), batches.values.toList());
+
+  List<Product> get belowMin => belowMinimum(products.values, batches.values.toList());
+
+  /// Catégorie de l'appli correspondant à une catégorie par défaut, même si
+  /// l'utilisateur l'a renommée (on suit sa position dans la liste).
+  String mapCategory(String name) {
+    final cats = settings.categories;
+    if (cats.contains(name)) return name;
+    final i = defaultCategories.indexOf(name);
+    if (i >= 0 && i < cats.length && !defaultCategories.contains(cats[i])) return cats[i];
+    return cats.contains('Autre') ? 'Autre' : cats.last;
+  }
+
+  /// Emplacement proposé : congelé ou Surgelé → congélateur, Frais → frigo, sinon placard.
+  String defaultLocation(String category, {bool frozen = false}) {
+    final locs = settings.locations;
+    String pick(String name, int idx) =>
+        locs.contains(name) ? name : (idx < locs.length ? locs[idx] : (locs.isEmpty ? '' : locs.first));
+    if (frozen || category == mapCategory('Surgelé')) return pick('Congélateur', 1);
+    if (category == mapCategory('Frais')) return pick('Frigo', 0);
+    return pick('Placard', 2);
+  }
 
   // -------------------------------------------------------------------------
   // Stock
@@ -123,6 +151,11 @@ class AppState extends ChangeNotifier {
     String? photoData,
     required double quantity,
     required DateTime expiration,
+    double? kcal100,
+    double? packQty,
+    String? packUnit,
+    bool frozen = false,
+    String? location,
   }) async {
     Product? product = (barcode != null && barcode.isNotEmpty) ? productByBarcode(barcode) : null;
     product ??= productByName(name);
@@ -141,9 +174,17 @@ class AppState extends ChangeNotifier {
         unit: unit,
         photoUrl: photoUrl,
         photoData: photoData,
+        kcal100: kcal100,
+        packQty: packQty,
+        packUnit: packQty == null ? null : packUnit,
       );
     } else {
       product.category = category;
+      if (kcal100 != null) product.kcal100 = kcal100;
+      if (packQty != null && product.packQty == null) {
+        product.packQty = packQty;
+        product.packUnit = packUnit;
+      }
       product.brand = brand ?? product.brand;
       if (barcode != null && barcode.isNotEmpty) product.barcode = barcode;
       if (photoUrl != null) product.photoUrl = photoUrl;
@@ -156,7 +197,14 @@ class AppState extends ChangeNotifier {
         product.unit = unit;
       }
     }
-    final batch = Batch(productId: product.id, quantity: qty, expirationDate: expiration);
+    final batch = Batch(
+      productId: product.id,
+      quantity: qty,
+      expirationDate: expiration,
+      frozen: frozen,
+      frozenAt: frozen ? dateOnly(DateTime.now()) : null,
+      location: (location == null || location.isEmpty) ? null : location,
+    );
     products[product.id] = product;
     batches[batch.id] = batch;
     notifyListeners();
@@ -172,6 +220,25 @@ class AppState extends ChangeNotifier {
     products[p.id] = p;
     notifyListeners();
     await _productsStore.record(p.id).put(_db, p.toJson());
+    await _syncShopping(); // le stock minimum a pu changer
+  }
+
+  /// Congèle un lot : la date ne compte plus.
+  Future<void> freezeBatch(Batch b) async {
+    b.frozen = true;
+    b.frozenAt = dateOnly(DateTime.now());
+    if (settings.useLocations) {
+      b.location = defaultLocation(products[b.productId]?.category ?? '', frozen: true);
+    }
+    await saveBatch(b);
+  }
+
+  /// Décongèle un lot : à consommer sous 24 h.
+  Future<void> thawBatch(Batch b) async {
+    b.frozen = false;
+    b.frozenAt = null;
+    b.expirationDate = dateOnly(DateTime.now()).add(const Duration(days: 1));
+    await saveBatch(b);
   }
 
   Future<void> saveBatch(Batch b) async {
@@ -191,6 +258,11 @@ class AppState extends ChangeNotifier {
           batches.remove(b.id);
           await _batchesStore.record(b.id).delete(t);
         } else {
+          // Paquet en g/ml dont on n'a utilisé qu'une partie : « entamé ».
+          if (e.value < b.quantity && !b.opened && !b.frozen && products[b.productId]?.unit != 'pièce') {
+            b.opened = true;
+            b.openedAt = dateOnly(DateTime.now());
+          }
           b.quantity = e.value;
           await _batchesStore.record(b.id).put(t, b.toJson());
         }
@@ -240,26 +312,22 @@ class AppState extends ChangeNotifier {
     await _syncShopping();
   }
 
-  /// Décrémente le stock des ingrédients d'une recette. Renvoie de quoi annuler.
-  Future<UndoSnapshot> consumeRecipe(Recipe recipe) async {
+  /// Décrémente le stock des ingrédients d'une recette, pour [people]
+  /// personnes (défaut : les portions de la recette). Renvoie de quoi annuler.
+  Future<UndoSnapshot> consumeRecipe(Recipe recipe, {int? people}) async {
     final all = products.values.toList();
+    final f = portionFactor(recipe, people);
     final touched = <String, Batch>{};
     final newQ = <String, double>{};
     for (final ing in recipe.ingredients) {
       final p = matchProduct(ing, all);
       if (p == null) continue;
-      final q = convert(ing.quantity, ing.unit, p.unit);
+      final q = convert(ing.quantity * f, ing.unit, p.unit);
       if (q == null) continue;
       // Lots avec les quantités déjà décrémentées par un ingrédient précédent.
       final lots = batchesOf(p.id).map((b) {
         touched.putIfAbsent(b.id, () => b.copy());
-        return Batch(
-          id: b.id,
-          productId: b.productId,
-          quantity: newQ[b.id] ?? b.quantity,
-          expirationDate: b.expirationDate,
-          addedDate: b.addedDate,
-        );
+        return b.copy()..quantity = newQ[b.id] ?? b.quantity;
       }).where((b) => b.quantity > 0);
       newQ.addAll(consumeFefo(lots, q).newQuantities);
     }
@@ -337,13 +405,14 @@ class AppState extends ChangeNotifier {
 
   /// Garde la liste de courses à jour quand le stock ou le planning change.
   Future<void> _syncShopping() async {
-    if (plan.isEmpty && !shopping.values.any((i) => i.auto)) return;
+    final hasMin = products.values.any((p) => (p.minQty ?? 0) > 0);
+    if (plan.isEmpty && !hasMin && !shopping.values.any((i) => i.auto)) return;
     await refreshShoppingFromPlan();
   }
 
-  /// Met à jour les lignes automatiques de la liste de courses d'après le planning.
+  /// Met à jour les lignes automatiques de la liste de courses (planning + minimum).
   Future<void> refreshShoppingFromPlan() async {
-    final updated = regenerateShopping(shopping.values.toList(), needs);
+    final updated = regenerateShopping(shopping.values.toList(), shoppingNeeds);
     final removed = shopping.keys.toSet().difference(updated.map((i) => i.id).toSet());
     shopping
       ..clear()

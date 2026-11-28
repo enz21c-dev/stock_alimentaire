@@ -85,6 +85,7 @@ List<PlannedNotification> planNotifications(
   final byDay = <DateTime, List<Batch>>{};
   final today = dateOnly(now);
   for (final b in batches) {
+    if (b.frozen) continue; // congelé : la date ne compte plus
     final day = dateOnly(b.expirationDate).subtract(Duration(days: alertDays));
     final when = DateTime(day.year, day.month, day.day, hour);
     if (!when.isAfter(now)) continue; // déjà dans la zone d'alerte : visible dans l'appli

@@ -22,6 +22,7 @@ class StockScreen extends StatefulWidget {
 class _StockScreenState extends State<StockScreen> {
   final _search = TextEditingController();
   String? _category; // null = toutes
+  String? _location; // null = partout
   _Sort _sort = _Sort.expiry;
 
   @override
@@ -30,10 +31,28 @@ class _StockScreenState extends State<StockScreen> {
     super.dispose();
   }
 
+  Widget _chips(List<String?> values, String? selected, String Function(String?) label, void Function(String?) onTap) =>
+      SizedBox(
+        height: 48,
+        child: ListView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          children: [
+            for (final c in values)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: ChoiceChip(label: Text(label(c)), selected: selected == c, onSelected: (_) => onTap(c)),
+              ),
+          ],
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
     final q = normalizeName(_search.text);
+    final useLoc = state.settings.useLocations;
+    if (!useLoc) _location = null;
 
     final all = state.productsInStock;
     final categories = {for (final p in all) p.category}.toList()
@@ -41,10 +60,15 @@ class _StockScreenState extends State<StockScreen> {
 
     final products = all.where((p) {
       if (_category != null && p.category != _category) return false;
+      if (_location != null && !state.batchesOf(p.id).any((b) => b.location == _location)) return false;
       if (q.isEmpty) return true;
       return normalizeName('${p.name} ${p.brand ?? ''}').contains(q);
     }).toList();
-    final nearest = {for (final p in products) p.id: state.batchesOf(p.id).first.expirationDate};
+    // Tout congelé : en fin de liste.
+    final nearest = {
+      for (final p in products)
+        p.id: state.batchesOf(p.id).first.frozen ? DateTime(9999) : state.batchesOf(p.id).first.expirationDate,
+    };
     products.sort((a, b) => _sort == _Sort.name
         ? normalizeName(a.name).compareTo(normalizeName(b.name))
         : nearest[a.id]!.compareTo(nearest[b.id]!));
@@ -53,6 +77,7 @@ class _StockScreenState extends State<StockScreen> {
     final anyExpired = state.expiringBatches.any((b) => daysUntil(b.expirationDate) < 0);
     final bannerBg = anyExpired ? Theme.of(context).colorScheme.errorContainer : const Color(0xFFFFE0B2);
     final bannerFg = anyExpired ? Theme.of(context).colorScheme.onErrorContainer : const Color(0xFF5D3A00);
+    final low = state.belowMin;
 
     return Scaffold(
       appBar: AppBar(
@@ -81,7 +106,7 @@ class _StockScreenState extends State<StockScreen> {
         FloatingActionButton.extended(
           heroTag: 'scan',
           onPressed: () {
-            unlockAudio(); // Safari n'autorise le son qu'après un appui
+            unlockAudio();
             Navigator.push(context, MaterialPageRoute(builder: (_) => const ScanScreen()));
           },
           icon: const Icon(Icons.qr_code_scanner),
@@ -102,30 +127,27 @@ class _StockScreenState extends State<StockScreen> {
                 isDense: true,
                 suffixIcon: _search.text.isEmpty
                     ? null
-                    : IconButton(
-                        icon: const Icon(Icons.clear),
-                        onPressed: () => setState(() => _search.clear()),
-                      ),
+                    : IconButton(icon: const Icon(Icons.clear), onPressed: () => setState(() => _search.clear())),
               ),
             ),
           ),
           if (categories.length > 1)
-            SizedBox(
-              height: 48,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                children: [
-                  for (final c in [null, ...categories])
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      child: ChoiceChip(
-                        label: Text(c ?? 'Tout'),
-                        selected: _category == c,
-                        onSelected: (_) => setState(() => _category = c),
-                      ),
-                    ),
-                ],
+            _chips([null, ...categories], _category, (c) => c ?? 'Tout', (c) => setState(() => _category = c)),
+          if (useLoc)
+            _chips([null, ...state.settings.locations], _location, (c) => c ?? '📍 Partout',
+                (c) => setState(() => _location = c)),
+          if (low.isNotEmpty)
+            Card(
+              margin: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+              color: const Color(0xFFFFE0B2),
+              child: ListTile(
+                leading: const Icon(Icons.shopping_cart_outlined, color: Color(0xFF5D3A00)),
+                title: Text(
+                  'Sous le stock minimum : ${low.take(3).map((p) => p.name).join(', ')}${low.length > 3 ? '…' : ''}',
+                  style: const TextStyle(color: Color(0xFF5D3A00)),
+                ),
+                trailing: const Icon(Icons.chevron_right, color: Color(0xFF5D3A00)),
+                onTap: () => HomeShell.goTo(context, HomeShell.shopping),
               ),
             ),
           if (expiring > 0)
@@ -164,6 +186,16 @@ class _StockScreenState extends State<StockScreen> {
   }
 }
 
+/// « · 539 kcal/100 g » ou « · 75 kcal/pièce » (vide si inconnu).
+String kcalInfo(Product p) {
+  if (p.kcal100 == null) return '';
+  if (p.unit == 'pièce') {
+    final k = kcalOf(p, 1, 'pièce');
+    return k == null ? '' : ' · ${kcalText(k)}/pièce';
+  }
+  return ' · ${kcalText(p.kcal100!)}/100 ${baseUnit(p.unit) == 'ml' ? 'ml' : 'g'}';
+}
+
 /// Un produit avec le total de ses lots ; se déplie pour voir chaque lot.
 class ProductCard extends StatelessWidget {
   const ProductCard({super.key, required this.product});
@@ -196,7 +228,6 @@ class ProductCard extends StatelessWidget {
     final state = AppScope.of(context);
     final lots = state.batchesOf(product.id);
     final total = lots.fold(0.0, (s, b) => s + b.quantity);
-    final alert = state.settings.alertDays;
     final first = lots.first;
 
     return Card(
@@ -209,8 +240,9 @@ class ProductCard extends StatelessWidget {
         subtitle: Padding(
           padding: const EdgeInsets.only(top: 4),
           child: Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
-            Text('${formatQty(total, product.unit)} au total${lots.length > 1 ? ' · ${lots.length} lots' : ''}'),
-            ExpiryChip(first.expirationDate, alertDays: alert),
+            Text('${formatQty(total, product.unit)} au total${lots.length > 1 ? ' · ${lots.length} lots' : ''}'
+                '${kcalInfo(product)}'),
+            LotTag(first, alertDays: state.settings.alertDays),
           ]),
         ),
         trailing: IconButton(
@@ -231,18 +263,14 @@ class ProductCard extends StatelessWidget {
             OutlinedButton.icon(
               icon: const Icon(Icons.add),
               label: const Text('Ajouter un lot'),
-              onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => AddArticleScreen(product: product)),
-              ),
+              onPressed: () =>
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => AddArticleScreen(product: product))),
             ),
             TextButton.icon(
               icon: const Icon(Icons.edit_outlined),
               label: const Text('Modifier le produit'),
-              onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => EditProductScreen(product: product)),
-              ),
+              onPressed: () =>
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => EditProductScreen(product: product))),
             ),
             TextButton.icon(
               icon: const Icon(Icons.delete_outline),
@@ -264,77 +292,151 @@ class _BatchRow extends StatelessWidget {
   final Product product;
   final Batch batch;
 
-  Future<void> _edit(BuildContext context) async {
-    final state = AppScope.read(context);
-    final qty = TextEditingController(text: formatNumber(batch.quantity));
-    var date = batch.expirationDate;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (c) => StatefulBuilder(
-        builder: (c, setD) => AlertDialog(
-          title: const Text('Modifier le lot'),
-          content: Column(mainAxisSize: MainAxisSize.min, children: [
+  @override
+  Widget build(BuildContext context) {
+    final state = AppScope.of(context);
+    final days = daysUntil(batch.expirationDate);
+    final loc = state.settings.useLocations ? ' · 📍 ${batch.location ?? 'emplacement ?'}' : '';
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: batch.frozen
+          ? const Icon(Icons.ac_unit, color: Color(0xFF1E88E5), size: 16)
+          : StatusDot(expiryStatus(days, alertDays: state.settings.alertDays)),
+      title: Row(children: [
+        Text(formatQty(batch.quantity, product.unit)),
+        if (batch.opened && !batch.frozen) ...[const SizedBox(width: 8), const OpenedTag()],
+      ]),
+      subtitle: Text(batch.frozen
+          ? '❄️ congelé${batch.frozenAt == null ? '' : ' le ${formatDate(batch.frozenAt!)}'} · la date ne compte pas$loc'
+          : 'À consommer avant le ${formatDate(batch.expirationDate)} · ${expiryLabel(days)}$loc'),
+      onTap: () => editLot(context, product, batch),
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        IconButton(
+          tooltip: 'Modifier, entamé, congeler',
+          icon: const Icon(Icons.more_horiz),
+          onPressed: () => editLot(context, product, batch),
+        ),
+        IconButton(
+          tooltip: 'Supprimer ce lot',
+          icon: const Icon(Icons.delete_outline),
+          onPressed: () async {
+            final snap = await state.deleteBatch(batch.id);
+            if (context.mounted) showUndo(context, 'Lot de ${product.name} supprimé', snap);
+          },
+        ),
+      ]),
+    );
+  }
+}
+
+/// Fiche d'un lot : quantité, date, entamé, congeler / décongeler, emplacement.
+Future<void> editLot(BuildContext context, Product product, Batch batch) async {
+  final state = AppScope.read(context);
+  final qty = TextEditingController(text: formatNumber(batch.quantity));
+  var date = batch.expirationDate;
+  var opened = batch.opened;
+  var location = batch.location ?? (state.settings.useLocations ? state.defaultLocation(product.category, frozen: batch.frozen) : null);
+  final today = dateOnly(DateTime.now());
+  final action = await showDialog<String>(
+    context: context,
+    builder: (c) => StatefulBuilder(
+      builder: (c, setD) => AlertDialog(
+        title: Text('Lot de ${product.name}'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             TextField(
               controller: qty,
               keyboardType: const TextInputType.numberWithOptions(decimal: true),
               decoration: InputDecoration(labelText: 'Quantité', suffixText: product.unit),
             ),
-            const SizedBox(height: 12),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.event),
-              title: const Text('Date de péremption'),
-              subtitle: Text(formatDate(date)),
-              onTap: () async {
-                final d = await showDatePicker(
-                  context: c,
-                  initialDate: date,
-                  firstDate: DateTime(2000),
-                  lastDate: DateTime(2100),
-                );
-                if (d != null) setD(() => date = d);
-              },
-            ),
+            if (state.settings.useLocations)
+              DropdownButtonFormField<String>(
+                initialValue: state.settings.locations.contains(location) ? location : null,
+                decoration: const InputDecoration(labelText: 'Emplacement'),
+                items: [for (final l in state.settings.locations) DropdownMenuItem(value: l, child: Text(l))],
+                onChanged: (v) => setD(() => location = v),
+              ),
+            const SizedBox(height: 8),
+            if (batch.frozen) ...[
+              Text('❄️ Congelé${batch.frozenAt == null ? '' : ' le ${formatDate(batch.frozenAt!)}'} : '
+                  'la date de péremption ne compte pas.'),
+              const SizedBox(height: 8),
+              OutlinedButton(
+                onPressed: () => Navigator.pop(c, 'thaw'),
+                child: const Text('Décongeler (à consommer sous 24 h)'),
+              ),
+            ] else ...[
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event),
+                title: const Text('À consommer avant le'),
+                subtitle: Text(formatDate(date)),
+                onTap: () async {
+                  final d = await showDatePicker(
+                      context: c, initialDate: date, firstDate: DateTime(2000), lastDate: DateTime(2100));
+                  if (d != null) setD(() => date = dateOnly(d));
+                },
+              ),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                value: opened,
+                title: const Text('Entamé'),
+                onChanged: (v) => setD(() => opened = v ?? false),
+              ),
+              const Text('Une fois ouvert, à finir sous :'),
+              Wrap(spacing: 6, children: [
+                for (final (label, n) in [('2 j', 2), ('3 j', 3), ('5 j', 5), ('1 sem.', 7), ('1 mois', 30)])
+                  ActionChip(
+                    label: Text(label),
+                    // Entamé + date raccourcie, sans jamais la repousser.
+                    onPressed: () => setD(() {
+                      opened = true;
+                      final d = today.add(Duration(days: n));
+                      if (d.isBefore(date)) date = d;
+                    }),
+                  ),
+              ]),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: () => Navigator.pop(c, 'freeze'),
+                icon: const Icon(Icons.ac_unit),
+                label: const Text('Congeler'),
+              ),
+            ],
           ]),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Annuler')),
-            FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Enregistrer')),
-          ],
         ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text('Annuler')),
+          FilledButton(onPressed: () => Navigator.pop(c, 'save'), child: const Text('Enregistrer')),
+        ],
       ),
-    );
-    final q = parseNumber(qty.text);
-    if (ok != true || q == null) return;
-    if (q <= 0) {
-      final snap = await state.deleteBatch(batch.id);
-      if (context.mounted) showUndo(context, 'Lot supprimé', snap);
-      return;
-    }
-    batch
-      ..quantity = q
-      ..expirationDate = dateOnly(date);
-    await state.saveBatch(batch);
+    ),
+  );
+  if (action == null || !context.mounted) return;
+  if (action == 'freeze') {
+    await state.freezeBatch(batch);
+    if (context.mounted) showMessage(context, '${product.name} : congelé, la date ne compte plus');
+    return;
   }
-
-  @override
-  Widget build(BuildContext context) {
-    final state = AppScope.of(context);
-    final days = daysUntil(batch.expirationDate);
-    return ListTile(
-      dense: true,
-      contentPadding: EdgeInsets.zero,
-      leading: StatusDot(expiryStatus(days, alertDays: state.settings.alertDays)),
-      title: Text(formatQty(batch.quantity, product.unit)),
-      subtitle: Text('À consommer avant le ${formatDate(batch.expirationDate)} · ${expiryLabel(days)}'),
-      onTap: () => _edit(context),
-      trailing: IconButton(
-        tooltip: 'Supprimer ce lot',
-        icon: const Icon(Icons.delete_outline),
-        onPressed: () async {
-          final snap = await state.deleteBatch(batch.id);
-          if (context.mounted) showUndo(context, 'Lot de ${product.name} supprimé', snap);
-        },
-      ),
-    );
+  if (action == 'thaw') {
+    await state.thawBatch(batch);
+    if (context.mounted) showMessage(context, '${product.name} : décongelé, à consommer avant demain');
+    return;
   }
+  final q = parseNumber(qty.text);
+  if (q == null) return;
+  if (q <= 0) {
+    final snap = await state.deleteBatch(batch.id);
+    if (context.mounted) showUndo(context, 'Lot supprimé', snap);
+    return;
+  }
+  batch
+    ..quantity = q
+    ..expirationDate = dateOnly(date)
+    ..location = location;
+  if (opened && !batch.opened) batch.openedAt = today;
+  batch.opened = opened;
+  await state.saveBatch(batch);
 }
